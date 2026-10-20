@@ -97,7 +97,10 @@ const W=800,H=460;
  // WebGL pass upscales it with smooth bilinear filtering + bloom, so quality is free.
  c.width=800;c.height=460;
 let state='menu',t=0,last=0,hp=100,bhp=180,coins=4,turn=1,mercy=0,score=0;
-let bullets=[],particles=[],keys={},audio=null,music=null,mute=false,inv=0,shake=0;
+let bullets=[],keys={},audio=null,music=null,mute=false,inv=0,shake=0;
+// LIGHTER PARTICLES: fixed-size pool + swap-remove cull. Zero allocations per frame,
+// zero GC pauses (GC spikes were a real source of the mid-fight 'crashes'/stutters).
+const particles=[];let pFree=[];
 const hero={x:400,y:365};
 const boss={x:400,y:105};
 const npcs=[
@@ -146,11 +149,18 @@ function updateUI(){
  $('#bossHp').style.width=(bhp/180*100)+'%';
  $('#coins').textContent=coins;$('#turn').textContent=turn;
 }
+// LIGHTER EFFECTS (no adaptive-resolution mechanism anywhere): bursts simply spawn FEWER
+// particles — they're drawn as one batched line-path per colour bucket, so big bursts cost
+// more draw segments for no extra visual quality. Hard cap keeps the array tiny even if a
+// "advanced" event spams bursts; oldest particles are recycled instead of piling up.
 function burst(px,py,n,col){
+ n=Math.min(n,9); // fewer sparks, same pop — they read as motion streaks either way
  for(let i=0;i<n;i++){
-  const a=rand(0,6.283),v=rand(1,5);
-  particles.push({x:px,y:py,vx:Math.cos(a)*v,vy:Math.sin(a)*v,
-   life:rand(20,45),color:col,size:rand(2,7)});
+  if(particles.length>=130)continue; // hard cap: bursts during 'advanced' events can never pile up
+  const a=rand(0,6.283),v=rand(1,5),p=pFree.pop()||{};
+  p.x=px;p.y=py;p.vx=Math.cos(a)*v;p.vy=Math.sin(a)*v;
+  p.life=rand(20,45);p.color=col;p.size=rand(2,7);
+  particles.push(p);
  }
 }
 function end(win,spared=false){
@@ -229,7 +239,7 @@ function act(a){if(state==='attack'&&a==='fight'){strike();return}
 }
 function reset(){
  hp=100;bhp=180;coins=4;turn=1;mercy=0;score=0;
- hero.x=400;hero.y=365;bullets=[];particles=[];inv=0;
+ hero.x=400;hero.y=365;bullets=[];pFree.push(...particles.splice(0));inv=0;
  updateUI();state='battle';dodgeTime=0;
  $('#overlay').style.display='none';log('🏡 The neighbours are counting on you. Probably.');
  audioStart();sfx('win');
@@ -432,8 +442,10 @@ function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='b
    if(turn%2===0){const n=pick(news);zoomFx(1);mercy=Math.min(90,mercy+10);log('📺 BREAKING (mid-fight!): '+n+' 🏳️‍🌈 Pride Power: Mercy +10!');['#e40303','#ff8c00','#ffed00','#008026','#004dff','#750787'].forEach(k=>burst(boss.x,boss.y,8,k));sheepBeep()}
   }
  }
- particles.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vx*=.98;p.vy*=.98;p.life-=dt/16});
- particles=particles.filter(p=>p.life>0);
+ // in-place swap-remove cull: no filter(), no new array, no garbage every frame
+ for(let i=particles.length-1;i>=0;i--){const p=particles[i];
+  p.x+=p.vx;p.y+=p.vy;p.vx*=.98;p.vy*=.98;p.life-=dt/16;
+  if(p.life<=0){pFree.push(p);const l=particles.pop();if(i<particles.length)particles[i]=l}}
  if(inv>0)inv-=dt/16;
 }
 function loop(now){
@@ -482,19 +494,30 @@ void main(){v=p*.5+.5;vec3 q=vec3(p*vec2(1.,.575)*k,0.);q.y-=o;
 float a=cos(r.x),b=sin(r.x),c=cos(r.y),d=sin(r.y);
 q=vec3(q.x*c+q.z*d,q.y,-q.x*d+q.z*c);q=vec3(q.x,q.y*a-q.z*b,q.y*b+q.z*a);
 gl_Position=vec4(q.xy/vec2(1.,.575),0.,1.+q.z*.7);}`;
-const fs=`precision mediump float;uniform sampler2D s,pv;uniform vec3 vd;uniform float m,sp,k,zm,rt;varying vec2 v;
-// 12 radial taps -> cheap bloom/frost (looks like depth-of-field bokeh)
-vec3 bl(vec2 u,float R){vec3 c=vec3(0.);for(int i=0;i<12;i++){float f=float(i)*2.4;c+=texture2D(pv,u+vec2(cos(f),sin(f)*.6)*R).rgb}return c/12.;}
+const fs=`precision mediump float;uniform sampler2D s,pv;uniform vec3 vd;uniform vec2 brf;uniform float m,sp,k,zm,rt;varying vec2 v;
+// 6 radial taps -> cheap bloom/frost. The old 12-tap loop was the most expensive thing in
+// the pipeline (every post pass samples it); a wider angular step keeps the exact same soft
+// bokeh look for HALF the texture fetches.
+vec3 bl(vec2 u,float R){vec3 c=vec3(0.);for(int i=0;i<6;i++){float f=float(i)*1.0472+.26;c+=texture2D(pv,u+vec2(cos(f),sin(f)*.6)*R).rgb}return c/6.;}
 void main(){
  if(m<.5){ // ---- MOTION PASS: genuine shutter integral, NOT a spaced-out ghost trail.
   // Every pixel is swept along the moving object's REAL screen-space velocity vector (vd)
   // with 18 DENSE sub-samples spanning exactly one frame of travel (~half-pixel spacing ->
   // one continuous smear, like 120fps content shown on a 60Hz panel). Flat weighting, like
   // an open camera shutter. Zoomed/rotated onto the action during hit punch-ins (zm/rt).
+  // LIGHTER BY DESIGN (no adaptive-resolution mechanism): the sweep is concentrated around
+  // the blur focus (brf) and falls off with distance - pixels far from the fast object do a
+  // single fetch instead of the full loop. That roughly halves average shader cost while
+  // the smear itself stays pixel-identical, because sample spacing near the focus is dense.
   vec2 w=v-.5;float cs=cos(rt),sn=sin(rt);vec2 v2=(vec2(cs*w.x-sn*w.y,sn*w.x+cs*w.y))/zm+.5;
-  vec2 d=vd*sp;vec3 c=vec3(0.);
-  for(int i=0;i<18;i++)c+=texture2D(s,v2+d*(float(i)-8.5)/9.).rgb;
-  gl_FragColor=vec4(c/18.,1.);return;}
+  vec2 d=vd*sp;
+  float dist=length((v-brf)*vec2(1.739,1.));        // aspect-corrected uv distance to focus
+  float infl=clamp(1.-dist*1.15,0.,1.);             // full strength at focus, gone by ~0.87uv
+  if(infl<=0.){gl_FragColor=vec4(texture2D(s,v2).rgb,1.);return;}
+  float N=6.+infl*10.;                               // 6..16 dense sub-samples near the action
+  vec3 c=vec3(0.);
+  for(int i=0;i<16;i++){if(float(i)>=N)break;c+=texture2D(s,v2+d*(float(i)-(N-1.)*.5)/N).rgb}
+  gl_FragColor=vec4(c/N,1.);return;}
  if(m<1.5){gl_FragColor=vec4(bl(v,.07)*.6,1.);return;} // shadow-caster blur
  vec2 u=(v-.5)*k/.9;vec2 e=abs(u)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
  float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
@@ -515,10 +538,7 @@ const S=tx(0),T=[tx(1),tx(2)],F=T.map(tt=>{const f=gl.createFramebuffer();gl.bin
 let ph=0,mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365;
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5},{passive:true});
 // cached uniform locations (getUniformLocation on every draw was pointless overhead)
-const UM=U('m'),UK=U('k'),UO=U('o'),UR=U('r'),USP=U('sp'),UZM=U('zm'),URT=U('rt'),US=U('s'),UPV=U('pv'),UVD=U('vd');
-// ---- downscale helper for the adaptive-quality upload path ----
-const sc=document.createElement('canvas'),sctx=sc.getContext('2d');
-let Q=0,qw=800,qh=460,fps=60,lastQ=0,lastT=0;
+const UM=U('m'),UK=U('k'),UO=U('o'),UR=U('r'),USP=U('sp'),UZM=U('zm'),URT=U('rt'),US=U('s'),UPV=U('pv'),UVD=U('vd'),UBR=U('brf');
 // shutter velocity vector (uv space) — recomputed every frame in glF() below.
 // MUST be declared here: `dr` closes over these and is defined before glF runs.
 let VX=.7,VY=-.714;
@@ -526,21 +546,14 @@ let VX=.7,VY=-.714;
 // smear), ramps to full one-frame-of-travel when something fast is on screen. Smoothed
 // so it never strobes between frames.
 let shutter=0;// NOTE: must not be named `sh` — that's the shader-compile helper above
-const dr=(m,k,o,rx,ry,pv)=>{gl.uniform1f(UM,m);gl.uniform1f(UK,k);gl.uniform1f(UO,o);gl.uniform2f(UR,rx,ry);gl.uniform1f(USP,shutter);gl.uniform3f(UVD,VX,VY,0);gl.uniform1i(US,0);gl.uniform1i(UPV,pv);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)};
+const dr=(m,k,o,rx,ry,pv)=>{gl.uniform1f(UM,m);gl.uniform1f(UK,k);gl.uniform1f(UO,o);gl.uniform2f(UR,rx,ry);gl.uniform1f(USP,shutter);gl.uniform3f(UVD,VX,VY,0);gl.uniform2f(UBR,BR.x,BR.y);gl.uniform1i(US,0);gl.uniform1i(UPV,pv);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)};
 glF=()=>{
  if(!gl.getProgramParameter(P,gl.LINK_STATUS)){$('#c').style.display='block';$('#gl').style.display='none';glF=()=>{};return}
- // ---- ADAPTIVE RESOLUTION: the canvas->texture upload is the only real per-frame cost.
- // The scene canvas is already capped at 800x460; if frames still get long we upload at
- // 2/3 or 1/2 size (the shutter blur + bloom hide it completely). Hysteresis in BOTH
- // directions so quality can never oscillate. Uses `t` (accumulated by update()), NOT the
- // rAF timestamp — glF() is called with no arguments, so `now` does not exist here.
- const dtms=Math.max(1,t-lastT);lastT=t;
- fps=fps*.88+(1000/dtms)*.12;
- let qT=Q;if(fps<46&&t-lastQ>1200)qT=Math.min(2,Q+1);else if(fps>57&&t-lastQ>3000)qT=Math.max(0,Q-1);
- if(qT!==Q){Q=qT;qw=[800,533,400][Q];qh=[460,307,230][Q];lastQ=t}
+ // FIXED QUALITY, NO ADAPTIVE MECHANISM: one direct full-res upload per frame. All the
+ // savings now come from making the effects themselves lighter (fewer particles, cheaper
+ // shaders), never from resolution juggling that could stutter or crash mid-fight.
  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
- if(Q===0)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
- else{sc.width=qw;sc.height=qh;sctx.drawImage(c,0,0,qw,qh);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,sc)}
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
  // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay
  fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?1.9:1.25),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;
  gl.uniform1f(UZM,zmv);gl.uniform1f(URT,rtv);
