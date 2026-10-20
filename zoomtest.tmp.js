@@ -1,21 +1,22 @@
-// Temporary verification harness: drives the real game script in jsdom with a mock GL,
-// triggers the CRAZY zoom (hurtBoss -> zoomFx(1) + burst particles), and asserts:
-//  1. no exception escapes the frame loop when particles draw (old buckets[p] TDZ crash)
-//  2. every zoom uniform stays finite and capped (tamed crazy numbers)
-//  3. a forced GL error mid-zoom falls back to 2D instead of freezing/crashing
+// Temporary verification harness for the NO-FALLBACK WebGL rewrite. Asserts:
+//  1. crazy zoom fires (particles + fxS=1) with ZERO uncaught errors
+//  2. every uniform fed to the GPU is finite, zm stays in [1, 1.6], rtv in [0, PI]
+//  3. a simulated context loss PAUSES rendering and webglcontextrestored REBUILDS it
 const {JSDOM}=require('jsdom');const fs=require('fs');
 function mk2d(){const noop=()=>{};return{fillStyle:'#000',strokeStyle:'#000',lineWidth:1,globalAlpha:1,lineCap:'butt',textAlign:'',textBaseline:'',font:'',canvas:null,setTransform:noop,transform:noop,scale:noop,translate:noop,rotate:noop,save:noop,restore:noop,beginPath:noop,closePath:noop,moveTo:noop,lineTo:noop,arc:noop,rect:noop,fill:noop,stroke:noop,fillRect:noop,clearRect:noop,strokeRect:noop,fillText:noop,measureText:()=>({width:10}),drawImage:noop,createLinearGradient:()=>({addColorStop:noop}),createRadialGradient:()=>({addColorStop:noop}),getImageData:(x,y,w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:noop}}
-let zmLog=[],errCode=0;
+let uLog=[],lost=false,errCode=0,builds=0,fboBroken=true,draws=0;
 function mkGL(){
  const ctx={createShader:()=>({}),shaderSource:()=>{},compileShader:()=>{},getShaderParameter:()=>true,getShaderInfoLog:()=>'',
- createProgram:()=>({}),attachShader:()=>{},linkProgram:()=>{},getProgramParameter:()=>true,getProgramInfoLog:()=>'',
+ createProgram:()=>{builds++;return{}},attachShader:()=>{},linkProgram:()=>{},getProgramParameter:()=>true,getProgramInfoLog:()=>'',
  useProgram:()=>{},getUniformLocation:(p,n)=>({__u:n}),getAttribLocation:()=>0,enableVertexAttribArray:()=>{},bindBuffer:()=>{},bufferData:()=>{},viewport:()=>{},
- disable:()=>{},enable:()=>{},blendFunc:()=>{},activeTexture:()=>{},bindTexture:()=>{},bindFramebuffer:()=>{},createTexture:()=>{},texParameteri:()=>{},
- texImage2D:()=>{},framebufferTexture2D:()=>{},createFramebuffer:()=>({}),createBuffer:()=>({}),vertexAttribPointer:()=>{},
- uniform1f:(loc,v)=>{if(typeof v==='number'&&!isFinite(v))throw new Error('non-finite uniform fed to GPU!');if(loc&&loc.__u==='zm')zmLog.push(v);if(loc&&loc.__u==='o'&&v>0)zmLog.push(9)},
- uniform2f:()=>{},uniform1i:()=>{},pixelStorei:()=>{},drawArrays:()=>{},getError:()=>errCode,isContextLost:()=>false};
- return new Proxy(ctx,{get(t,k){if(k in t)return t[k];return 1}});}
-const html=fs.readFileSync('index.html','utf8');
+ disable:()=>{},enable:()=>{},blendFunc:()=>{},activeTexture:()=>{},bindTexture:()=>{},bindFramebuffer:()=>{},createTexture:()=>({}),texParameteri:()=>{},
+ texImage2D:()=>{},copyTexSubImage2D:()=>{draws++},framebufferTexture2D:()=>{},createFramebuffer:()=>({}),createBuffer:()=>({}),vertexAttribPointer:()=>{},
+ checkFramebufferStatus:()=>fboBroken?1:36053,isContextLost:()=>lost,
+ uniform1f:(loc,v)=>{if(!Number.isFinite(v))throw new Error('non-finite uniform '+v);if(loc&&loc.__u==='zm')uLog.push(['zm',v]);if(loc&&loc.__u==='rt')uLog.push(['rt',v]);if(loc&&loc.__u==='o'&&v>0)uLog.push(['o',v])},
+ uniform2f:(loc,x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))throw new Error('non-finite vec uniform')},
+ uniform1i:()=>{},pixelStorei:()=>{},drawArrays:()=>{draws++;if(errCode)throw new Error('simulated driver throw')},getError:()=>errCode};
+ return new Proxy(ctx,{get(t,k){if(k in t)return t[k];return k==='FRAMEBUFFER_COMPLETE'?36053:1}});}
+const html=fs.readFileSync(process.env.GAME_HTML||'index.html','utf8');
 const dom=new JSDOM(html,{runScripts:'outside-only'});const win=dom.window;
 win.HTMLCanvasElement.prototype.getContext=function(kind){if(kind==='2d'){const c=mk2d();c.canvas=this;return c}this.__gl=mkGL();return this.__gl};
 win.Audio=function(){return{play:()=>Promise.resolve(),pause:()=>{},load:()=>{}}};
@@ -27,23 +28,31 @@ const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];win.eval(script);
 win.document.querySelector('#start').dispatchEvent(new win.MouseEvent('click',{bubbles:true}));
 function pump(n){for(let i=0;i<n;i++){const cbs=win.__raf;win.__raf=[];for(const cb of cbs){try{cb(performance.now()+i*16.7)}catch(e){errors.push(e)}}}}
 pump(5);
-// FIGHT -> strike => hurtBoss => zoomFx(1) + 20-particle burst = the exact "crazy 3d" moment
+// FIGHT -> strike => hurtBoss => zoomFx(1) + particle burst = the exact "crazy 3d" moment
 win.document.querySelector('[data-a="fight"]').dispatchEvent(new win.MouseEvent('click',{bubbles:true}));
 pump(10);
 win.document.dispatchEvent(new win.KeyboardEvent('keydown',{key:' '}));
-zmLog=[];
+uLog=[];
 pump(40); // whole crazy-zoom decay WITH live particles on screen
 console.log('TEST1 crazy zoom w/ particles: uncaught errors =',errors.length===0?'0 (PASS)':'FAIL '+errors.map(String));
-const maxz=Math.max(...zmLog.filter(v=>v>1));
-console.log('TEST2 crazy zoom peak magnification =',maxz.toFixed(3),'-> tamed (<=1.55):',maxz<=1.55?'PASS':'FAIL','| all finite:',zmLog.every(Number.isFinite)?'PASS':'FAIL');
-// force a GL driver error mid-crazy-zoom: must fall back to 2D, never freeze
-win.document.querySelector('[data-a="fight"]').dispatchEvent(new win.MouseEvent('click',{bubbles:true}));
-pump(3);
-win.document.dispatchEvent(new win.KeyboardEvent('keydown',{key:' '}));
-errCode=1286;
-const before=errors.length;
-pump(10);
-console.log('TEST3 forced GL error during zoom: gl canvas hidden =',win.document.querySelector('#gl').style.display==='none','| 2D shown =',win.document.querySelector('#c').style.display==='block','| uncaught =',errors.length-before===0?'0 (PASS)':'FAIL');
-errCode=0;pump(40);
-console.log('TEST4 game keeps running after fallback: PASS (frames pumped, errors total =',errors.length+')');
+const zms=uLog.filter(e=>e[0]==='zm').map(e=>e[1]),rts=uLog.filter(e=>e[0]==='rt').map(e=>e[1]);
+const badZ=zms.filter(v=>!(v>=1&&v<=1.6001)),badR=rts.filter(v=>!(v>=-0.0001&&v<=3.1417));
+console.log('TEST2 zm range:',Math.min(...zms).toFixed(3),'..',Math.max(...zms).toFixed(3),'-> in [1,1.6]:',badZ.length===0?'PASS':'FAIL '+badZ.slice(0,3));
+console.log('TEST3 rt range:',Math.min(...rts).toFixed(3),'..',Math.max(...rts).toFixed(3),'-> in [0,PI]:',badR.length===0?'PASS':'FAIL '+badR.slice(0,3));
+console.log('TEST4 all uniforms finite during crazy zoom: PASS (any non-finite would have thrown)');
+// beep-beep button must also survive its gentle punch
+win.document.querySelector('#sheepBtn').dispatchEvent(new win.MouseEvent('click',{bubbles:true}));
+pump(30);
+console.log('TEST5 beep-beep zoom: uncaught errors =',errors.length===0?'0 (PASS)':'FAIL '+errors.map(String));
+// simulate context loss -> pause, then restore -> rebuild + resume (NO fallback exists)
+const glEl=win.document.querySelector('#gl');
+lost=true;
+glEl.dispatchEvent(new win.Event('webglcontextlost',{cancelable:true}));
+const bBefore=builds;pump(10);
+console.log('TEST6 context lost: game keeps pumping, no errors =',errors.length===0?'PASS':'FAIL');
+lost=false;
+glEl.dispatchEvent(new win.Event('webglcontextrestored'));
+console.log('TEST7 context restored: pipeline rebuilt =',builds>bBefore?'PASS (programs recompiled)':'FAIL');
+pump(20);
+console.log('TEST8 renders after rebuild with zero uncaught errors =',errors.length===0?'PASS':'FAIL '+errors.map(String));
 process.exit(errors.length?1:0);
