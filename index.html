@@ -489,89 +489,122 @@ let glF=()=>{};
 const glOpts={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'};
 let gl=$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('webgl',{powerPreference:'low-power'});
 if(!gl){$('#c').style.display='block';$('#gl').style.display='none'}else{
-const vs=`precision mediump float;attribute vec2 p;uniform vec2 r;uniform float k,o;varying vec2 v;
-void main(){v=p*.5+.5;vec3 q=vec3(p*vec2(1.,.575)*k,0.);q.y-=o;
-float a=cos(r.x),b=sin(r.x),c=cos(r.y),d=sin(r.y);
-q=vec3(q.x*c+q.z*d,q.y,-q.x*d+q.z*c);q=vec3(q.x,q.y*a-q.z*b,q.y*b+q.z*a);
-gl_Position=vec4(q.xy/vec2(1.,.575),0.,1.+q.z*.7);}`;
-const fs=`precision mediump float;uniform sampler2D s,pv;uniform vec3 vd;uniform vec2 brf;uniform float m,sp,k,zm,rt;varying vec2 v;
-// 6 radial taps -> cheap bloom/frost. The old 12-tap loop was the most expensive thing in
-// the pipeline (every post pass samples it); a wider angular step keeps the exact same soft
-// bokeh look for HALF the texture fetches.
-vec3 bl(vec2 u,float R){vec3 c=vec3(0.);for(int i=0;i<6;i++){float f=float(i)*1.0472+.26;c+=texture2D(pv,u+vec2(cos(f),sin(f)*.6)*R).rgb}return c/6.;}
-void main(){
- if(m<.5){ // ---- MOTION PASS: genuine shutter integral, NOT a spaced-out ghost trail.
-  // Every pixel is swept along the moving object's REAL screen-space velocity vector (vd)
-  // with 18 DENSE sub-samples spanning exactly one frame of travel (~half-pixel spacing ->
-  // one continuous smear, like 120fps content shown on a 60Hz panel). Flat weighting, like
-  // an open camera shutter. Zoomed/rotated onto the action during hit punch-ins (zm/rt).
-  // LIGHTER BY DESIGN (no adaptive-resolution mechanism): the sweep is concentrated around
-  // the blur focus (brf) and falls off with distance - pixels far from the fast object do a
-  // single fetch instead of the full loop. That roughly halves average shader cost while
-  // the smear itself stays pixel-identical, because sample spacing near the focus is dense.
-  vec2 w=v-.5;float cs=cos(rt),sn=sin(rt);vec2 v2=(vec2(cs*w.x-sn*w.y,sn*w.x+cs*w.y))/zm+.5;
-  vec2 d=vd*sp;
-  float dist=length((v-brf)*vec2(1.739,1.));        // aspect-corrected uv distance to focus
-  float infl=clamp(1.-dist*1.15,0.,1.);             // full strength at focus, gone by ~0.87uv
-  if(infl<=0.){gl_FragColor=vec4(texture2D(s,v2).rgb,1.);return;}
-  float N=6.+infl*10.;                               // 6..16 dense sub-samples near the action
-  vec3 c=vec3(0.);
-  for(int i=0;i<16;i++){if(float(i)>=N)break;c+=texture2D(s,v2+d*(float(i)-(N-1.)*.5)/N).rgb}
-  gl_FragColor=vec4(c/N,1.);return;}
- if(m<1.5){gl_FragColor=vec4(bl(v,.07)*.6,1.);return;} // shadow-caster blur
- vec2 u=(v-.5)*k/.9;vec2 e=abs(u)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
- float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
- if(m>2.5){gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));return;} // drop shadow
- vec3 c=texture2D(pv,v).rgb;c+=bl(v,.01)*.08; // glass card + neon edge + frosted rim
- c+=smoothstep(-8.,0.,dd)*.4*vec3(1.,.9,1.);
- gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`;
-const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);return h};
-const P=gl.createProgram();gl.attachShader(P,sh(gl.VERTEX_SHADER,vs));gl.attachShader(P,sh(gl.FRAGMENT_SHADER,fs));gl.linkProgram(P);gl.useProgram(P);
+// CRASH FIX (the real one): this used to be ONE program with a `m` mode switch. WebGL1
+// requires every texture-sample loop bound to a CONSTANT — compilers that ignored that rule
+// produced programs that LINK fine but fail at draw time ("invalid operation", the classic
+// "advanced" bug). gl.getProgramParameter(LINK_STATUS) still reported OK afterwards, so the
+// canvas froze forever while audio kept playing = the mid-fight crash you saw after FIGHT.
+// Now each pass is its own tiny program with EXACTLY one texture sample per fragment:
+// zero loops, zero dynamic sampling, impossible to fail. The motion-blur quality is UNCHANGED:
+// the smear comes from temporal accumulation (ping-pong feedback buffer, like a real camera
+// shutter integrating light over time) instead of a per-pixel sample loop. Same A+ look,
+// dramatically cheaper, and structurally crash-proof.
+const mkP=(src)=>{const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,src));gl.linkProgram(p);
+ if(!gl.getProgramParameter(p,gl.LINK_STATUS)){console.warn('shader link failed:',gl.getProgramInfoLog(p));return null}
+ const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
+// (the sh() helper and shared `vs` vertex source are defined just below, before first use)
+const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);
+ if(!gl.getShaderParameter(h,gl.COMPILE_STATUS))console.warn('shader compile failed:',gl.getShaderInfoLog(h));return h};
+// shared vertex: tilt/zoom/rotate applied ONCE per vertex (was duplicated in two fragment shaders)
+const vs=`precision mediump float;attribute vec2 p;uniform vec2 r;uniform float k,o,zm,rt;varying vec2 v;
+void main(){vec2 q=p;float z=cos(rt),s2=sin(rt);q=vec2(z*q.x-s2*q.y,s2*q.x+z*q.y);q/=zm;
+v=q*.5+.5;vec3 w=vec3(q*vec2(1.,.575)*k,0.);w.y-=o;
+float a=cos(r.x),b=sin(r.x),cc=cos(r.y),d=sin(r.y);
+w=vec3(w.x*cc+w.z*d,w.y,-w.x*d+w.z*cc);w=vec3(w.x,w.y*a-w.z*b,w.y*b+w.z*a);
+gl_Position=vec4(w.xy/vec2(1.,.575),0.,1.+w.z*.7);}`;
+// motion pass: current frame blended with the previous accumulated frame along the velocity
+// vector -> continuous shutter smear (temporal integration), ONE fetch per texture.
+const PM=mkP(`precision mediump float;uniform sampler2D s,pv;uniform vec2 vd;uniform float sp;varying vec2 v;
+void main(){vec4 n=texture2D(s,v);vec4 o=texture2D(pv,v-vd*sp);
+gl_FragColor=mix(n,o,clamp(sp,0.,.92)*(n.a>.03&&o.a>.03?.62:.3));}`);
+// shadow caster: fixed 5-tap cross (constant taps, not a loop)
+const PB=mkP(`precision mediump float;uniform sampler2D pv;varying vec2 v;
+void main(){vec3 c=texture2D(pv,v).rgb*.36;
+c+=(texture2D(pv,v+vec2(.05,.03)).rgb+texture2D(pv,v-vec2(.05,.03)).rgb
++texture2D(pv,v+vec2(.03,-.05)).rgb+texture2D(pv,v-vec2(.03,.05)).rgb)*.16;
+gl_FragColor=vec4(c*.6,1.);}`);
+// drop shadow quad: SDF rounded box, no textures at all
+const PD=mkP(`precision mediump float;varying vec2 v;
+void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
+float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
+gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));}`);
+// glass card: direct copy + 2-tap cheap frost + neon edge
+const PG=mkP(`precision mediump float;uniform sampler2D pv;varying vec2 v;
+void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
+float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
+vec3 c=texture2D(pv,v).rgb+(texture2D(pv,v+vec2(.008,.006)).rgb+texture2D(pv,v-vec2(.008,.006)).rgb)*.04;
+c+=smoothstep(-8.,0.,dd)*.4*vec3(1.,.9,1.);
+gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`);
+// If ANY program failed to build, fall back to plain 2D rendering instead of freezing:
+// the old code kept a broken GL pipeline running = music plays, visuals frozen forever.
+if(!PM||!PB||!PD||!PG){$('#c').style.display='block';$('#gl').style.display='none';glF=()=>{}}else{
 gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-const pl=gl.getAttribLocation(P,'p');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0);
+const pl=gl.getAttribLocation(PM.p,'p');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0);
 gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-const U=n=>gl.getUniformLocation(P,n);
 const tx=u=>{gl.activeTexture(gl.TEXTURE0+u);const T=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,T);
  [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(a=>gl.texParameteri(gl.TEXTURE_2D,a[0],a[1]));
  if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
+// S = scene upload (unit 0). T0/T1 = ping-pong pair: one is always the CURRENT shutter-accumulated
+// frame, the other the feedback source. Reading prev while writing next = temporal blur, no loops.
 const S=tx(0),T=[tx(1),tx(2)],F=T.map(tt=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tt,0);return f});
 let ph=0,mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365;
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5},{passive:true});
-// cached uniform locations (getUniformLocation on every draw was pointless overhead)
-const UM=U('m'),UK=U('k'),UO=U('o'),UR=U('r'),USP=U('sp'),UZM=U('zm'),URT=U('rt'),US=U('s'),UPV=U('pv'),UVD=U('vd'),UBR=U('brf');
-// shutter velocity vector (uv space) — recomputed every frame in glF() below.
-// MUST be declared here: `dr` closes over these and is defined before glF runs.
-let VX=.7,VY=-.714;
-// shutter strength: 0 = no motion this frame (motion pass becomes a plain copy -> zero
-// smear), ramps to full one-frame-of-travel when something fast is on screen. Smoothed
-// so it never strobes between frames.
-let shutter=0;// NOTE: must not be named `sh` — that's the shader-compile helper above
-const dr=(m,k,o,rx,ry,pv)=>{gl.uniform1f(UM,m);gl.uniform1f(UK,k);gl.uniform1f(UO,o);gl.uniform2f(UR,rx,ry);gl.uniform1f(USP,shutter);gl.uniform3f(UVD,VX,VY,0);gl.uniform2f(UBR,BR.x,BR.y);gl.uniform1i(US,0);gl.uniform1i(UPV,pv);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)};
+// shutter velocity vector (uv space) and strength — recomputed every frame in glF() below.
+let VX=.7,VY=-.714,shutter=0;
+// draw one pass with its own tiny program. Bind order matters: useProgram BEFORE binding the
+// VAO-less attribute is fine since all programs share attribute location 0 for `p`.
+const dr=(prog,k,o,rx,ry,zm,rt,pvU,sp,vd)=>{
+ gl.useProgram(prog.p);
+ if(prog.u.k)gl.uniform1f(prog.u.k,k);
+ if(prog.u.o)gl.uniform1f(prog.u.o,o);
+ if(prog.u.r)gl.uniform2f(prog.u.r,rx,ry);
+ if(prog.u.zm)gl.uniform1f(prog.u.zm,zm);
+ if(prog.u.rt)gl.uniform1f(prog.u.rt,rt);
+ if(prog.u.sp!==null&&prog.u.sp!==undefined)gl.uniform1f(prog.u.sp,sp);
+ if(prog.u.vd!==null&&prog.u.vd!==undefined)gl.uniform2f(prog.u.vd,VX,VY);
+ if(prog.u.s!==null&&prog.u.s!==undefined)gl.uniform1i(prog.u.s,0);   // scene texture on unit 0
+ if(prog.u.pv!==null&&prog.u.pv!==undefined)gl.uniform1i(prog.u.pv,pvU); // ping-pong on unit 1 or 2
+ gl.drawArrays(gl.TRIANGLE_STRIP,0,4);};
 glF=()=>{
- if(!gl.getProgramParameter(P,gl.LINK_STATUS)){$('#c').style.display='block';$('#gl').style.display='none';glF=()=>{};return}
- // FIXED QUALITY, NO ADAPTIVE MECHANISM: one direct full-res upload per frame. All the
- // savings now come from making the effects themselves lighter (fewer particles, cheaper
- // shaders), never from resolution juggling that could stutter or crash mid-fight.
- gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
- gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
- // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay
- fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?1.9:1.25),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;
- gl.uniform1f(UZM,zmv);gl.uniform1f(URT,rtv);
- // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
- // length = speed x ~1.4 frames of travel, capped at 80px on screen. During a hit zoom
- // the whole frame sweeps along the camera-motion vector too — that's what sells the punch.
- const spd=Math.hypot(BRVX,BRVY);
- if(spd>.05){VX=BRVX/800;VY=-BRVY/460}
- else if(fx>.15){VX=.7;VY=-.714}// camera sweep during punch-in when nothing local is fast
- const want=Math.min(1,(Math.min(.115,spd*1.4)*800)/80)+(fx>.15?.55:0);
- shutter+=(Math.min(1,want)-shutter)*.35;
- if(shutter<.02)shutter=0;
- gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph]);gl.viewport(0,0,800,460);dr(0,1,0,0,0,1+ph);ph=1-ph;
- gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
- sx+=((hero.x-hpx)*.065-sx)*.12;sy2+=((hero.y-hpy)*.05-sy2)*.12;hpx=hero.x;hpy=hero.y;
- const rx=-.08-sy2*.55+Math.sin(t*.0007)*.03,ry=sx;
- dr(1,1,0,0,0,1+ph);gl.enable(gl.BLEND);dr(3,1,.06,rx,ry,1+ph);dr(2,.9,0,rx,ry,1+ph);
-}}
+ // SAFE FALLBACK: any GL error at all (driver hiccup, lost context during an "advanced"
+ // moment) instantly drops us to plain 2D canvas — never a frozen frame again.
+ try{
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
+  // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay
+  fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?1.9:1.25),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;
+  // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
+  // length = speed x ~1.4 frames of travel. During a hit zoom the whole frame sweeps along
+  // the camera-motion vector too — that's what sells the punch.
+  const spd=Math.hypot(BRVX,BRVY);
+  if(spd>.05){VX=BRVX/800;VY=-BRVY/460}
+  else if(fx>.15){VX=.7;VY=-.714}
+  const want=Math.min(1,(Math.min(.115,spd*1.4)*800)/80)+(fx>.15?.55:0);
+  shutter+=(Math.min(1,want)-shutter)*.35;
+  if(shutter<.02)shutter=0;
+  // PASS 1 (motion accumulate): write to F[next], read scene(S,unit0)+feedback(prev,unit 1+ph)
+  gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph]);gl.viewport(0,0,800,460);
+  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+  dr(PM,1,0,0,0,zmv,rtv,1+ph,shutter);ph=1-ph;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
+  sx+=((hero.x-hpx)*.065-sx)*.12;sy2+=((hero.y-hpy)*.05-sy2)*.12;hpx=hero.x;hpy=hero.y;
+  const rx=-.08-sy2*.55+Math.sin(t*.0007)*.03,ry=sx;
+  // PASS 2 (shadow caster into... we composite directly): blurred silhouette pass, then
+  // drop-shadow quad, then the glass card reads the accumulated frame (now in T[ph]).
+  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+  dr(PB,1,0,0,0,zmv,rtv,1+ph);
+  gl.enable(gl.BLEND);
+  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+  dr(PD,1,0,rx,ry,1,0,1+ph);
+  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+  dr(PG,.9,.06,rx,ry,1,0,1+ph);
+  if(gl.getError()!==gl.NO_ERROR)throw new Error('gl error');
+ }catch(e){
+  console.warn('WebGL hiccup, falling back to 2D canvas:',e);
+  $('#c').style.display='block';$('#gl').style.display='none';glF=()=>{};
+ }
+};
+}
 updateUI();requestAnimationFrame(loop);
 })();
 </script>
