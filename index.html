@@ -499,6 +499,7 @@ if(!gl){$('#c').style.display='block';$('#gl').style.display='none'}else{
 // the smear comes from temporal accumulation (ping-pong feedback buffer, like a real camera
 // shutter integrating light over time) instead of a per-pixel sample loop. Same A+ look,
 // dramatically cheaper, and structurally crash-proof.
+// NOTE: sh() and vs are declared right below; mkP is only *called* after they exist (TDZ-safe).
 const mkP=(src)=>{const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,src));gl.linkProgram(p);
  if(!gl.getProgramParameter(p,gl.LINK_STATUS)){console.warn('shader link failed:',gl.getProgramInfoLog(p));return null}
  const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
@@ -601,10 +602,13 @@ glF=()=>{
   if(gl.getError()!==gl.NO_ERROR)throw new Error('gl error');
  }catch(e){
   console.warn('WebGL hiccup, falling back to 2D canvas:',e);
-  $('#c').style.display='block';$('#gl').style.display='none';glF=()=>{};
+  // stop the GL pipeline touching a dead context AND restore normal 2D compositing
+  glF=()=>{};try{gl.disable(gl.BLEND);gl.disableVertexAttribArray(0)}catch(_){}
+  $('#c').style.display='block';$('#gl').style.display='none';
  }
 };
-}
+}//end WebGL-else
+}//end GL-setup else (if(!gl){...}else{ ... })
 updateUI();requestAnimationFrame(loop);
 })();
 </script>

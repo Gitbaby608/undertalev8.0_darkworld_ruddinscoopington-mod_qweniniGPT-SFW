@@ -14,7 +14,9 @@ function mkGL(){const U=new Proxy({},{get:()=>(...a)=>({})});
   enableVertexAttribArray:()=>{},bindBuffer:()=>{},bufferData:()=>{},viewport:()=>{},
   disable:()=>{},enable:()=>{},blendFunc:()=>{},activeTexture:()=>{},bindTexture:()=>{},bindFramebuffer:()=>{},
   createTexture:()=>({}),texParameteri:()=>{},texImage2D:()=>{},framebufferTexture2D:()=>{},createFramebuffer:()=>({}),
-  pixelStorei:()=>{},drawArrays:()=>{if(glErrorMode)throw new Error('simulated driver crash')},getError:()=>0,
+  createBuffer:()=>({}),vertexAttribPointer:()=>{},deleteProgram:()=>{},deleteShader:()=>{},
+  uniform1f:()=>{},uniform2f:()=>{},uniform1i:()=>{},
+  pixelStorei:()=>{},drawArrays:()=>{if(glErrorMode)throw new Error('simulated driver crash')},getError:()=>glErrorMode?1286:0,
  };
  // numeric constants as any property access returns numbers if not a function
  return new Proxy(ctx,{get(t,k){if(k in t)return t[k];return 1}});}
