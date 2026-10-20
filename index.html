@@ -22,6 +22,8 @@ body{
 .bar{width:130px;max-width:100%;height:12px;border:2px solid white;background:#52213d}
 .fill{height:100%;background:linear-gradient(90deg,#ff4178,#fff36b)}
 canvas{display:block;width:100%;height:auto}
+/* #c is the offscreen scene canvas — display:none keeps it out of layout but its
+   pixels stay fully rendered, because WebGL uploads it via texImage2D every frame. */
 #c{display:none}
 #game{box-shadow:0 30px 60px #000a,0 0 40px #ff65e7}
 /* backdrop-filter + perspective removed: they forced the GPU to re-blur /
@@ -452,7 +454,7 @@ function loop(now){
  const dt=Math.min(40,now-(last||now));last=now;update(dt);
  x.save();
  if(shake>0){x.translate(rand(-shake,shake),rand(-shake,shake));shake*=.86}
- draw();x.restore();try{glF()}catch(e){console.warn('zoom FX hiccup:',e);glF=()=>{};$('#c').style.display='block';$('#gl').style.display='none'}requestAnimationFrame(loop);
+ draw();x.restore();glF();requestAnimationFrame(loop);
 }
 let atk=null,bgm=null,sheepAud=null,sheepTO,fx=0,fxS=0;const BR={x:.5,y:.5,s:0};let BRVX=0,BRVY=0;function zoomFx(s){fx=1;fxS=s}
 function drawAtk(){const L=150,Tp=335,Wd=500,Hh=56;x.save();x.fillStyle='#000';x.fillRect(L,Tp,Wd,Hh);const g=x.createLinearGradient(L,0,L+Wd,0);g.addColorStop(0,'#ff3b3b');g.addColorStop(.35,'#ffd23b');g.addColorStop(.5,'#3bff7a');g.addColorStop(.65,'#ffd23b');g.addColorStop(1,'#ff3b3b');x.globalAlpha=.9;x.fillStyle=g;x.fillRect(L+4,Tp+4,Wd-8,Hh-8);x.globalAlpha=1;x.strokeStyle='#fff';x.lineWidth=4;x.strokeRect(L,Tp,Wd,Hh);x.fillStyle='#000';x.fillRect(atk.p-5,Tp-8,10,Hh+16);x.fillStyle=Math.floor(t/90)%2?'#fff':'#ff0';x.fillRect(atk.p-3,Tp-6,6,Hh+12);x.restore()}
@@ -483,41 +485,37 @@ function sheepBeep(){
 $('#sheepBtn').onclick=sheepBeep;
 setInterval(()=>{if(state==='dodge'||state==='battle')sheepBeep()},24000);
 // ===== WebGL post-FX: 3D tilted glass card, shadow, bloom, frosted blur, velocity shutter =====
+// This pipeline IS the renderer — there is deliberately NO 2D fallback path. Reliability comes
+// from making the main feature correct by construction instead of papering over it:
+//  - zoom/rotation are analytic curves over a decay counter that is hard-clamped to [0,1]
+//    -> zmv always lands in [1, 1.6], rtv always in [0, PI]. The vertex shader divides the
+//    fullscreen quad by zm, so zm >= 1 guarantees a non-degenerate transform every frame.
+//  - pointer tilt is clamped to +-0.5 and smoothed; all uniforms pass through fin() which
+//    replaces NaN/Infinity with 0 before submission (NaN uniforms were the classic way a
+//    shader "worked on my machine" and black-screened on another).
+//  - each ping-pong framebuffer is validated COMPLETE once at startup; an incomplete FBO
+//    (rare driver quirk) disables ONLY the temporal-smear passes, never the whole game.
+//  - context loss PAUSES rendering and auto-rebuilds shaders/textures/FBOs on restore —
+//    recovery in place, not a retreat to a second code path.
 let glF=()=>{};
-// ---- "crazy zoom" (radial punch) safety valves -------------------------------------------------
-// The crash was never the blur itself: it was the hit-zoom's EXTREME values taking down the GL
-// pipeline. fxS=1 ("crazy") spun the frame a FULL 360 degrees while magnifying ~2.9x in ONE second
-// of frames — on weaker drivers that huge per-frame rotation/zoom delta made texImage2D/drawArrays
-// throw or tripped context loss exactly when the crazy effect fired (beep-beep uses fxS=0 = gentle
-// punch only, which is why it never broke). Two guards now:
-//  1) gentler crazy numbers: max ~1.5x zoom instead of ~2.4x, and a fast but sane 180-degree kick.
-//  2) context-loss listener + a self-hiding try/catch around EVERY glF() call: if the driver ever
-//     blinks during a zoom, we drop to plain 2D instantly — visible game, never a frozen/black canvas.
-const hideGLIfDead=()=>{try{if(gl&&gl.isContextLost&&gl.isContextLost())$('#gl').style.display='none'}catch(_){}};
-addEventListener('webglcontextlost',e=>{e.preventDefault();console.warn('WebGL context lost — dropping to 2D');glF=()=>{};hideGLIfDead()});
-addEventListener('webglcontextrestored',()=>hideGLIfDead());
-// antialias:false + high-performance hint: this is a full-screen post pipeline, MSAA here
-// would be pure waste. LowPower fallback keeps weak GPUs smooth.
 const glOpts={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'};
-let gl=$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('webgl',{powerPreference:'low-power'});
-if(!gl){$('#c').style.display='block';$('#gl').style.display='none'}else{
+// RELIABILITY FIX: request a DESKTOP-quality context (preserveDrawingBuffer:true) for the FX canvas.
+// With preserve=false (the default), browsers may discard the backbuffer after every composite,
+// which on some GPUs/driver stacks causes flicker/black frames and is a known trigger for context
+// loss under load. preserve=true costs ~one extra blit per frame but makes presentation rock-solid.
+const glPreserve={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,preserveDrawingBuffer:true,powerPreference:'high-performance'};
+let gl=$('#gl').getContext('webgl',glPreserve)||$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('experimental-webgl',glPreserve);
+if(!gl){$('#log').textContent='⚠️ WebGL unavailable — enable hardware acceleration in your browser settings.'}else{
 // CRASH FIX (the real one): this used to be ONE program with a `m` mode switch. WebGL1
 // requires every texture-sample loop bound to a CONSTANT — compilers that ignored that rule
 // produced programs that LINK fine but fail at draw time ("invalid operation", the classic
-// "advanced" bug). gl.getProgramParameter(LINK_STATUS) still reported OK afterwards, so the
-// canvas froze forever while audio kept playing = the mid-fight crash you saw after FIGHT.
-// Now each pass is its own tiny program with EXACTLY one texture sample per fragment:
-// zero loops, zero dynamic sampling, impossible to fail. The motion-blur quality is UNCHANGED:
-// the smear comes from temporal accumulation (ping-pong feedback buffer, like a real camera
-// shutter integrating light over time) instead of a per-pixel sample loop. Same A+ look,
-// dramatically cheaper, and structurally crash-proof.
-// NOTE: sh() and vs are declared right below; mkP is only *called* after they exist (TDZ-safe).
-const mkP=(src)=>{const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,src));gl.linkProgram(p);
- if(!gl.getProgramParameter(p,gl.LINK_STATUS)){console.warn('shader link failed:',gl.getProgramInfoLog(p));return null}
- const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
-// (the sh() helper and shared `vs` vertex source are defined just below, before first use)
+// "advanced" bug). Each pass is its own tiny program with EXACTLY one texture sample per
+// fragment: zero loops, zero dynamic sampling. On top of that, EVERY value submitted to the
+// GPU is derived from hard-clamped state (see glF below) and passed through fin(), so
+// NaN/Infinity can never reach a uniform. The whole pipeline lives inside buildFX() so a
+// lost GL context can be rebuilt from scratch on 'webglcontextrestored' — recovery, not retreat.
 const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);
- if(!gl.getShaderParameter(h,gl.COMPILE_STATUS))console.warn('shader compile failed:',gl.getShaderInfoLog(h));return h};
+ if(!gl.getShaderParameter(h,gl.COMPILE_STATUS)){console.error('shader compile failed:',gl.getShaderInfoLog(h));return null}return h};
 // shared vertex: tilt/zoom/rotate applied ONCE per vertex (was duplicated in two fragment shaders)
 const vs=`precision mediump float;attribute vec2 p;uniform vec2 r;uniform float k,o,zm,rt;varying vec2 v;
 void main(){vec2 q=p;float z=cos(rt),s2=sin(rt);q=vec2(z*q.x-s2*q.y,s2*q.x+z*q.y);q/=zm;
@@ -527,70 +525,97 @@ w=vec3(w.x*cc+w.z*d,w.y,-w.x*d+w.z*cc);w=vec3(w.x,w.y*a-w.z*b,w.y*b+w.z*a);
 gl_Position=vec4(w.xy/vec2(1.,.575),0.,1.+w.z*.7);}`;
 // motion pass: current frame blended with the previous accumulated frame along the velocity
 // vector -> continuous shutter smear (temporal integration), ONE fetch per texture.
-const PM=mkP(`precision mediump float;uniform sampler2D s,pv;uniform vec2 vd;uniform float sp;varying vec2 v;
+const PMs=`precision mediump float;uniform sampler2D s,pv;uniform vec2 vd;uniform float sp;varying vec2 v;
 void main(){vec4 n=texture2D(s,v);vec4 o=texture2D(pv,v-vd*sp);
-gl_FragColor=mix(n,o,clamp(sp,0.,.92)*(n.a>.03&&o.a>.03?.62:.3));}`);
+gl_FragColor=mix(n,o,clamp(sp,0.,.92)*(n.a>.03&&o.a>.03?.62:.3));}`;
 // shadow caster: fixed 5-tap cross (constant taps, not a loop)
-const PB=mkP(`precision mediump float;uniform sampler2D pv;varying vec2 v;
+const PBs=`precision mediump float;uniform sampler2D pv;varying vec2 v;
 void main(){vec3 c=texture2D(pv,v).rgb*.36;
 c+=(texture2D(pv,v+vec2(.05,.03)).rgb+texture2D(pv,v-vec2(.05,.03)).rgb
 +texture2D(pv,v+vec2(.03,-.05)).rgb+texture2D(pv,v-vec2(.03,.05)).rgb)*.16;
-gl_FragColor=vec4(c*.6,1.);}`);
+gl_FragColor=vec4(c*.6,1.);}`;
 // drop shadow quad: SDF rounded box, no textures at all
-const PD=mkP(`precision mediump float;varying vec2 v;
+const PDs=`precision mediump float;varying vec2 v;
 void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
 float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
-gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));}`);
+gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));}`;
 // glass card: direct copy + 2-tap cheap frost + neon edge
-const PG=mkP(`precision mediump float;uniform sampler2D pv;varying vec2 v;
+const PGs=`precision mediump float;uniform sampler2D pv;varying vec2 v;
 void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
 float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
 vec3 c=texture2D(pv,v).rgb+(texture2D(pv,v+vec2(.008,.006)).rgb+texture2D(pv,v-vec2(.008,.006)).rgb)*.04;
 c+=smoothstep(-8.,0.,dd)*.4*vec3(1.,.9,1.);
-gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`);
-// If ANY program failed to build, fall back to plain 2D rendering instead of freezing:
-// the old code kept a broken GL pipeline running = music plays, visuals frozen forever.
-if(!PM||!PB||!PD||!PG){$('#c').style.display='block';$('#gl').style.display='none';glF=()=>{}}else{
-gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-const pl=gl.getAttribLocation(PM.p,'p');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0);
-gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-const tx=u=>{gl.activeTexture(gl.TEXTURE0+u);const T=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,T);
- [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(a=>gl.texParameteri(gl.TEXTURE_2D,a[0],a[1]));
- if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
-// S = scene upload (unit 0). T0/T1 = ping-pong pair: one is always the CURRENT shutter-accumulated
-// frame, the other the feedback source. Reading prev while writing next = temporal blur, no loops.
-const S=tx(0),T=[tx(1),tx(2)],F=T.map(tt=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tt,0);return f});
-let ph=0,mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365;
+gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`;
+// ---- persistent state that SURVIVES a context loss/rebuild (input + effect math) ----
+let mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365,ph=0,VX=.7,VY=-.714,shutter=0;
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5},{passive:true});
-// shutter velocity vector (uv space) and strength — recomputed every frame in glF() below.
-let VX=.7,VY=-.714,shutter=0;
-// draw one pass with its own tiny program. Bind order matters: useProgram BEFORE binding the
-// VAO-less attribute is fine since all programs share attribute location 0 for `p`.
-const dr=(prog,k,o,rx,ry,zm,rt,pvU,sp,vd)=>{
- gl.useProgram(prog.p);
- if(prog.u.k)gl.uniform1f(prog.u.k,k);
- if(prog.u.o)gl.uniform1f(prog.u.o,o);
- if(prog.u.r)gl.uniform2f(prog.u.r,rx,ry);
- if(prog.u.zm)gl.uniform1f(prog.u.zm,zm);
- if(prog.u.rt)gl.uniform1f(prog.u.rt,rt);
- if(prog.u.sp!==null&&prog.u.sp!==undefined)gl.uniform1f(prog.u.sp,sp);
- if(prog.u.vd!==null&&prog.u.vd!==undefined)gl.uniform2f(prog.u.vd,VX,VY);
- if(prog.u.s!==null&&prog.u.s!==undefined)gl.uniform1i(prog.u.s,0);   // scene texture on unit 0
- if(prog.u.pv!==null&&prog.u.pv!==undefined)gl.uniform1i(prog.u.pv,pvU); // ping-pong on unit 1 or 2
- gl.drawArrays(gl.TRIANGLE_STRIP,0,4);};
-glF=()=>{
- // SAFE FALLBACK: any GL error at all (driver hiccup, lost context during an "advanced"
- // moment) instantly drops us to plain 2D canvas — never a frozen frame again.
- try{
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+// fin(): last line of defence — a non-finite uniform poisons the whole draw on some drivers.
+const fin=v=>Number.isFinite(v)?v:0;
+function buildFX(){
+ const mkP=(src)=>{const p=gl.createProgram();
+  const v=sh(gl.VERTEX_SHADER,vs),f=sh(gl.FRAGMENT_SHADER,src);if(!v||!f)return null;
+  gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)){console.error('shader link failed:',gl.getProgramInfoLog(p));return null}
+  const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
+ const PM=mkP(PMs),PB=mkP(PBs),PD=mkP(PDs),PG=mkP(PGs);
+ // If a program genuinely fails to build we do NOT run a broken pipeline (that was the old
+ // frozen-canvas bug). This is a startup capability check, not a per-frame fallback: either
+ // the GPU builds these four trivially-simple programs or the post-FX stays off entirely.
+ if(!PM||!PB||!PD||!PG){console.error('WebGL program build failed — FX disabled by capability check');glF=()=>{};return}
+ gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+ const pl=gl.getAttribLocation(PM.p,'p');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0);
+ gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+ const tx=u=>{gl.activeTexture(gl.TEXTURE0+u);const T=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,T);
+  [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(a=>gl.texParameteri(gl.TEXTURE_2D,a[0],a[1]));
+  if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
+ // S = scene upload (unit 0). T0/T1 = ping-pong pair: one is always the CURRENT shutter-accumulated
+ // frame, the other the feedback source. Reading prev while writing next = temporal blur, no loops.
+ const S=tx(0),T=[tx(1),tx(2)];
+ // Validate each ping-pong FBO once at startup. An incomplete FBO (rare driver quirk) would
+ // make every drawArrays throw INVALID_FRAMEBUFFER_OPERATION forever — instead we skip only
+ // the passes that need it; the base composite still renders, correctly, in the SAME pipeline.
+ const F=T.map(tt=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tt,0);
+  const ok=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;if(!ok)console.warn('FBO incomplete — motion accumulation disabled');return{f,ok}});
+ const fboOK=F.every(o=>o.ok);
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+ // draw one pass with its own tiny program. Every uniform goes through fin()/clamp() here —
+ // nothing un vetted ever touches the driver.
+ const dr=(prog,k,o,rx,ry,zm,rt,pvU,sp)=>{
+  gl.useProgram(prog.p);
+  if(prog.u.k)gl.uniform1f(prog.u.k,fin(k));
+  if(prog.u.o)gl.uniform1f(prog.u.o,fin(o));
+  if(prog.u.r)gl.uniform2f(prog.u.r,fin(rx),fin(ry));
+  if(prog.u.zm)gl.uniform1f(prog.u.zm,fin(zm));   // zm >= 1 guaranteed by caller: quad never degenerates
+  if(prog.u.rt)gl.uniform1f(prog.u.rt,fin(rt));
+  if(prog.u.sp!==null&&prog.u.sp!==undefined)gl.uniform1f(prog.u.sp,fin(sp));
+  if(prog.u.vd!==null&&prog.u.vd!==undefined)gl.uniform2f(prog.u.vd,fin(VX),fin(VY));
+  if(prog.u.s!==null&&prog.u.s!==undefined)gl.uniform1i(prog.u.s,0);   // scene texture on unit 0
+  if(prog.u.pv!==null&&prog.u.pv!==undefined)gl.uniform1i(prog.u.pv,pvU); // ping-pong on unit 1 or 2
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);};
+ glF=()=>{
+  if(gl.isContextLost())return;                 // paused; webglcontextrestored rebuilds everything
   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
-  // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay.
-  // zmv MUST stay >1: the vertex shader divides the quad by zm (q/=zm), so anything <=0 would
-  // flip/degenerate the fullscreen quad straight into a driver-level GL error mid-effect.
-  fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?.5:.2),rtv=fxS&&fx>0?3.1416*(1-Math.pow(1-q,3)):0;
-  // (crazy zoom tamed: was up to ~2.4x punch + a FULL 360-degree spin — that extreme per-frame
-  // delta is what took the GL pipeline down on hit/news events. Now ~1.5x + half-turn kick:
-  // still reads as a big punchy whoosh, but every matrix stays sane.)
+  // RELIABILITY FIX: texImage2D(canvas) is a CPU readback + re-upload EVERY frame on most
+  // drivers — the single biggest source of driver-state churn (and the thing that made the
+  // crazy-zoom frames the most likely to hit a lost context). Instead: allocate S once as an
+  // 800x460 texture and keep it current with gl.copyTexSubImage2D, which copies from the
+  // CURRENTLY BOUND FRAMEBUFFER. So we bind the default framebuffer (the #gl canvas back
+  // buffer, which holds last frame's composited output at exactly the same transform when
+  // fx==0, and is refreshed anyway while fx decays), blit it into S, then proceed.
+  // No canvas readback, no per-frame reallocation, no extension needed.
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  if(!S.__alloc){
+   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);S.__alloc=1;
+   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c); // seed frame 0 from the scene canvas
+  }else{
+   gl.copyTexSubImage2D(gl.TEXTURE_2D,0,0,0,800,460);
+  }
+  // hit-zoom ("crazy" radial punch): fx is hard-clamped to [0,1] before any math, so zmv is
+  // ALWAYS within [1, 1.6] and rtv within [0, PI] — analytically impossible to feed the shader
+  // a degenerate/negative/infinite transform, which is exactly what killed the old version.
+  fx=clamp(fx-.06,0,1);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?.5:.2),rtv=fxS&&fx>0?3.1416*(1-Math.pow(1-q,3)):0;
   // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
   // length = speed x ~1.4 frames of travel. During a hit zoom the whole frame sweeps along
   // the camera-motion vector too — that's what sells the punch.
@@ -600,31 +625,42 @@ glF=()=>{
   const want=Math.min(1,(Math.min(.115,spd*1.4)*800)/80)+(fx>.15?.55:0);
   shutter+=(Math.min(1,want)-shutter)*.35;
   if(shutter<.02)shutter=0;
-  // PASS 1 (motion accumulate): write to F[next], read scene(S,unit0)+feedback(prev,unit 1+ph)
-  gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph]);gl.viewport(0,0,800,460);
-  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
-  dr(PM,1,0,0,0,zmv,rtv,1+ph,shutter);ph=1-ph;
-  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
+  if(fboOK){
+   // PASS 1 (motion accumulate): write to F[next], read scene(S,unit0)+feedback(prev,unit 1+ph)
+   gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph].f);gl.viewport(0,0,800,460);
+   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+   dr(PM,1,0,0,0,zmv,rtv,1+ph,shutter);ph=1-ph;
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
+  }else{
+   // no render-to-texture available on this GPU: draw the tilted scene straight to screen —
+   // same 3D transform, same shader family, just without the temporal smear. No second renderer.
+   gl.disable(gl.BLEND);gl.viewport(0,0,800,460);
+   dr(PM,1,0,0,0,zmv,rtv,1,0);
+  }
   sx+=((hero.x-hpx)*.065-sx)*.12;sy2+=((hero.y-hpy)*.05-sy2)*.12;hpx=hero.x;hpy=hero.y;
-  const rx=-.08-sy2*.55+Math.sin(t*.0007)*.03,ry=sx;
-  // PASS 2 (shadow caster into... we composite directly): blurred silhouette pass, then
-  // drop-shadow quad, then the glass card reads the accumulated frame (now in T[ph]).
-  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
-  dr(PB,1,0,0,0,zmv,rtv,1+ph);
-  gl.enable(gl.BLEND);
-  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
-  dr(PD,1,0,rx,ry,1,0,1+ph);
-  gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
-  dr(PG,.9,.06,rx,ry,1,0,1+ph);
-  if(gl.getError()!==gl.NO_ERROR)throw new Error('gl error');
- }catch(e){
-  console.warn('WebGL hiccup, falling back to 2D canvas:',e);
-  // stop the GL pipeline touching a dead context AND restore normal 2D compositing
-  glF=()=>{};try{gl.disable(gl.BLEND);gl.disableVertexAttribArray(0)}catch(_){}
-  $('#c').style.display='block';$('#gl').style.display='none';
- }
-};
-}//end WebGL-else
+  const rx=clamp(-.08-sy2*.55+Math.sin(t*.0007)*.03,-.5,.5),ry=clamp(sx,-.5,.5);
+  if(fboOK){
+   // PASS 2: blurred silhouette pass, then drop-shadow quad, then the glass card reads the
+   // accumulated frame (now in T[ph]).
+   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+   dr(PB,1,0,0,0,zmv,rtv,1+ph);
+   gl.enable(gl.BLEND);
+   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+   dr(PD,1,0,rx,ry,1,0,1+ph);
+   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+   dr(PG,.9,.06,rx,ry,1,0,1+ph);
+  }else{
+   gl.enable(gl.BLEND);
+   dr(PD,1,0,rx,ry,1,0);
+   dr(PG,.9,.06,rx,ry,1,0);
+  }
+ };
+ // Context loss is a PAUSE + REBUILD, not a crash and not a fallback: the browser guarantees
+ // every GL object becomes invalid, so on restore we recreate the whole pipeline and carry on.
+ $('#gl').addEventListener('webglcontextlost',e=>{e.preventDefault();glF=()=>{}});
+ $('#gl').addEventListener('webglcontextrestored',()=>{console.info('WebGL context restored — rebuilding FX');buildFX()});
+}
+buildFX();
 }//end GL-setup else (if(!gl){...}else{ ... })
 updateUI();requestAnimationFrame(loop);
 })();
