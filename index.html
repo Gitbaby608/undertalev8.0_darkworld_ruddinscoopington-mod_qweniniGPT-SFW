@@ -164,7 +164,7 @@ function burst(px,py,n,col){
  }
 }
 function end(win,spared=false){
- state='over';if(bgm)bgm.pause();music=null;
+ state='over';if(bgm)bgm.pause();music=null;fx=0; // kill any in-flight crazy zoom so it can't fire mid-overlay
  $('#overlay').style.display='flex';
  $('#overlay').innerHTML=`<div class="panel"><h1>${win?'🎉 NEIGHBOURHOOD SAVED!':'💀 OH NOOO!'}</h1>
  <p>${spared?'Sir Scoopington has joined the neighbourhood watch!':win?'THE ICE CREAM IS SAFE!':'YOU HAVE BEEN FLATTENED BY DESSERT.'}</p>
@@ -400,7 +400,7 @@ function draw(){
   for(const p of particles){(buckets[p.color]||(buckets[p.color]=[])).push(p)}
   for(const col in buckets){
    x.strokeStyle=col;x.beginPath();
-   for(const p of buckets[p]){x.moveTo(p.x,p.y);x.lineTo(p.x-p.vx*3,p.y-p.vy*3)}
+   for(const q of buckets[col]){x.moveTo(q.x,q.y);x.lineTo(q.x-q.vx*3,q.y-q.vy*3)}
    x.lineWidth=buckets[col][0].size;x.stroke();
   }
  }
@@ -452,7 +452,7 @@ function loop(now){
  const dt=Math.min(40,now-(last||now));last=now;update(dt);
  x.save();
  if(shake>0){x.translate(rand(-shake,shake),rand(-shake,shake));shake*=.86}
- draw();x.restore();glF();requestAnimationFrame(loop);
+ draw();x.restore();try{glF()}catch(e){console.warn('zoom FX hiccup:',e);glF=()=>{};$('#c').style.display='block';$('#gl').style.display='none'}requestAnimationFrame(loop);
 }
 let atk=null,bgm=null,sheepAud=null,sheepTO,fx=0,fxS=0;const BR={x:.5,y:.5,s:0};let BRVX=0,BRVY=0;function zoomFx(s){fx=1;fxS=s}
 function drawAtk(){const L=150,Tp=335,Wd=500,Hh=56;x.save();x.fillStyle='#000';x.fillRect(L,Tp,Wd,Hh);const g=x.createLinearGradient(L,0,L+Wd,0);g.addColorStop(0,'#ff3b3b');g.addColorStop(.35,'#ffd23b');g.addColorStop(.5,'#3bff7a');g.addColorStop(.65,'#ffd23b');g.addColorStop(1,'#ff3b3b');x.globalAlpha=.9;x.fillStyle=g;x.fillRect(L+4,Tp+4,Wd-8,Hh-8);x.globalAlpha=1;x.strokeStyle='#fff';x.lineWidth=4;x.strokeRect(L,Tp,Wd,Hh);x.fillStyle='#000';x.fillRect(atk.p-5,Tp-8,10,Hh+16);x.fillStyle=Math.floor(t/90)%2?'#fff':'#ff0';x.fillRect(atk.p-3,Tp-6,6,Hh+12);x.restore()}
@@ -484,6 +484,18 @@ $('#sheepBtn').onclick=sheepBeep;
 setInterval(()=>{if(state==='dodge'||state==='battle')sheepBeep()},24000);
 // ===== WebGL post-FX: 3D tilted glass card, shadow, bloom, frosted blur, velocity shutter =====
 let glF=()=>{};
+// ---- "crazy zoom" (radial punch) safety valves -------------------------------------------------
+// The crash was never the blur itself: it was the hit-zoom's EXTREME values taking down the GL
+// pipeline. fxS=1 ("crazy") spun the frame a FULL 360 degrees while magnifying ~2.9x in ONE second
+// of frames — on weaker drivers that huge per-frame rotation/zoom delta made texImage2D/drawArrays
+// throw or tripped context loss exactly when the crazy effect fired (beep-beep uses fxS=0 = gentle
+// punch only, which is why it never broke). Two guards now:
+//  1) gentler crazy numbers: max ~1.5x zoom instead of ~2.4x, and a fast but sane 180-degree kick.
+//  2) context-loss listener + a self-hiding try/catch around EVERY glF() call: if the driver ever
+//     blinks during a zoom, we drop to plain 2D instantly — visible game, never a frozen/black canvas.
+const hideGLIfDead=()=>{try{if(gl&&gl.isContextLost&&gl.isContextLost())$('#gl').style.display='none'}catch(_){}};
+addEventListener('webglcontextlost',e=>{e.preventDefault();console.warn('WebGL context lost — dropping to 2D');glF=()=>{};hideGLIfDead()});
+addEventListener('webglcontextrestored',()=>hideGLIfDead());
 // antialias:false + high-performance hint: this is a full-screen post pipeline, MSAA here
 // would be pure waste. LowPower fallback keeps weak GPUs smooth.
 const glOpts={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'};
@@ -572,8 +584,13 @@ glF=()=>{
  try{
   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
-  // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay
-  fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?1.9:1.25),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;
+  // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay.
+  // zmv MUST stay >1: the vertex shader divides the quad by zm (q/=zm), so anything <=0 would
+  // flip/degenerate the fullscreen quad straight into a driver-level GL error mid-effect.
+  fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?.5:.2),rtv=fxS&&fx>0?3.1416*(1-Math.pow(1-q,3)):0;
+  // (crazy zoom tamed: was up to ~2.4x punch + a FULL 360-degree spin — that extreme per-frame
+  // delta is what took the GL pipeline down on hit/news events. Now ~1.5x + half-turn kick:
+  // still reads as a big punchy whoosh, but every matrix stays sane.)
   // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
   // length = speed x ~1.4 frames of travel. During a hit zoom the whole frame sweeps along
   // the camera-motion vector too — that's what sells the punch.
