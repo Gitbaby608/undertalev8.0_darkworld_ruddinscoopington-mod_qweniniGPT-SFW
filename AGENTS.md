@@ -10,20 +10,20 @@ Dense working notes for any agent touching this repo. Read fully before editing.
 - `package.json` — only dependency is `jsdom` (dev-only, used by the tests). `node_modules/` present locally.
 
 ## Architecture of index.html (top → bottom, single script)
-1. CSS/HTML shell: retro-PU font, HUD bars, `#c` (scene canvas, `display:none`, fixed 800×460 backing store), `#gl` (visible FX canvas), log/ticker/buttons/overlay.
+1. CSS/HTML shell: retro-PU font, HUD bars, `#c` (scene canvas, VISIBLE since the frozen-frame fix — GL composites additively over it; hiding it = frozen first frame, see Failure Log #10), `#gl` (FX overlay canvas), log/ticker/buttons/overlay.
 2. Game state machine: `state ∈ menu|battle|attack|dodge|over`. Undertale-style: FIGHT → timing bar (`drawAtk`/`strike`) → `hurtBoss` → `enemyTurn` → `attackPattern` (4 bullet patterns) → dodge with WASD. Mercy≥100 or boss HP 0 ends game.
 3. Sprites: everything baked ONCE into offscreen canvases via `mkSpr` at `DPR`/`TXR`/`BGR` supersample scales (`SPR{}`, `emojiSprite`, `txtSpr`). Frame = ~20 `drawImage`s. NEVER reintroduce per-frame `shadowBlur`/gradients/text rasterisation in `draw()` — that was the original 30fps cause.
 4. NPCs: `NPCS[]` run `ACTS[]` "bits" (scooter, slots, parcel…) each writing `o.vx/o.vy` velocity used by the motion-blur pass. `updNpc` lerps toward target.
 5. Particles: fixed pool, hard cap 130, swap-remove cull, drawn as ONE batched line-path per colour bucket in `draw()`. `burst(px,py,n,col)` capped at n≤9. Loop vars here are `i/p/q/col` — see Failure Log #1 before touching this block.
 6. Zoom trigger: `zoomFx(s)` sets `fx=1, fxS=s` (s=1 "crazy" big punch+rotation, s=0 gentle). Fired by: `hurtBoss(1)`, `hurtHero(0)`, turn%2 news event (crazy), `sheepBeep`(gentle). `end()` zeroes `fx` so no zoom can fire under the game-over overlay.
-7. WebGL post-FX pipeline (lines ~487–660, inside `buildFX()` so a lost context can be rebuilt): 4 tiny programs sharing one vertex shader — PM (temporal shutter ping-pong), PB (5-tap shadow), PD (SDF drop-shadow quad), PG (glass card). Scene canvas S unit 0, ping-pong T[0]/T[1] units 1/2, phase `ph`.
+7. WebGL post-FX pipeline (inside `buildFX()` so a lost context can be rebuilt): 4 tiny programs sharing one vertex shader — PM (temporal shutter ping-pong), PB (soft-light bloom), PD (warm radial glow), PG (frost). Scene canvas S unit 0, ping-pong T[0]/T[1] units 1/2, character mask M unit 3 (MC canvas: `mkMask()` blobs + `CHARQ[]` positions stamped by `composeMsk()` each frame). ALL passes are alpha-weighted by M → blurs/glow affect characters ONLY, never the full 3D backdrop.
 
 ## WebGL rules (hard-won; violating these caused the crashes)
 - **One texture sample per fragment, constant loop bounds.** WebGL1 compilers accept dynamic-loop-sample programs at LINK time then fail at DRAW time ("invalid operation") on many drivers. The old single program with an `m` mode switch + sampled loop was the original crash. Four static programs instead. Do not merge them or add loops.
 - **Every uniform passes through `fin()`** (NaN/Infinity→0) and every effect input is hard-clamped BEFORE math: `fx∈[0,1]` ⇒ `zmv∈[1,1.6]`, `rtv∈[0,π]`, pointer tilt clamped ±0.5 and smoothed. The vertex shader divides the quad by `zm`, so `zm≥1` is load-bearing — never allow `zm<1` or unclamped `fx`.
 - **No 2D fallback. Deliberately.** User explicitly rejected fallback paths ("make the main feature good"). Reliability model: correct-by-construction math + startup capability checks + pause-and-rebuild on context loss. If you feel the urge to add a try/catch→2D-canvas retreat, DON'T. A startup check that disables only FX programs, or an FBO-incomplete check that skips only the smear passes (same pipeline, same shaders), is acceptable; a second renderer is not.
 - Context loss: `webglcontextlost` → `preventDefault()` + `glF=()=>{}` (pause); `webglcontextrestored` → `buildFX()` recreates everything. Persistent JS-side state (mx/my/tilt/fx) lives OUTSIDE `buildFX` so it survives rebuilds. All GL objects are invalid after loss — never cache handles across it.
-- Scene transport (current): allocate S once (800×460), seed frame 0 from `#c` via `texImage2D`, then update per frame with `gl.copyTexSubImage2D` from the default framebuffer (requires `preserveDrawingBuffer:true` — that's why the context is requested with it first, then without, then `experimental-webgl`). Per-frame `texImage2D(canvas)` CPU readback was driver-churn #1.
+- Scene transport (current): per-frame `gl.texImage2D(canvas)` uploads of `#c` into S AND of `MC` (char mask) into M (unit 3). The `copyTexSubImage2D` backbuffer trick is GONE — reading the default framebuffer only ever returned frame 0 = frozen game (Failure Log #10). No `preserveDrawingBuffer` needed anymore. Mask upload makes GL passes alpha-weighted so effects touch ONLY characters.
 - Canvas sizing: scene canvas is FIXED 800×460 regardless of DPR; CSS upscales. Never size it to `clientWidth*DPR` again (that upload bandwidth killed fps).
 
 ## Known-good behaviour to preserve
@@ -48,6 +48,9 @@ Regression-check old revisions cheaply: `git show HEAD:index.html > /tmp/old.htm
 7. **Previous agent turn claimed "created AGENTS.md" without creating it** — always `ls`/verify artifacts exist before reporting them done.
 8. **Backdrop-filter/perspective CSS on `#game`** forced whole-page GPU re-composite per frame; removed, tilt lives in the shader. Don't re-add glass CSS over animating content.
 9. **GC spikes from per-frame allocations** (particle arrays via `filter()`, fresh gradient objects) — pool + swap-remove + baked sprites. Keep `draw()` allocation-free.
+
+10. **Frozen first frame after Start** — the `copyTexSubImage2D`-from-default-framebuffer scene transport only captured frame 0 (and `#c` was `display:none`, so nothing else updated visibly). Buttons kept working while the render sat dead. Fixed: `#c` visible + per-frame `texImage2D(#c)`/`texImage2D(MC)` uploads. Verified by `freezecheck.tmp.js` (TEST1-4: per-frame canvas uploads ≈2×frames, zero `copyTexSubImage2D`, exactly 2 upload sources scene+mask, `#c` CSS not hidden). Run: `node freezecheck.tmp.js`.
+11. **Comment verbosity** — user asked for terser comments to save AI context budget. In-code comments now state WHY (perf/crash history) in one line max; no play-by-play WHAT. Keep it that way on every edit.
 
 ## Style conventions
 Minified-ish dense JS, no semicolon-less lines mixing, comments explain WHY (perf/crash history) not WHAT. Emoji UI strings. Keep edits surgical; the file has one giant IIFE — a stray brace kills everything silently (jsdom eval error is your canary: `node smoke.test.js` prints `SCRIPT EVAL ERROR`).
