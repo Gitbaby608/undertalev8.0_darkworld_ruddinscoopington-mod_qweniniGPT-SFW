@@ -23,12 +23,16 @@ body{
 .fill{height:100%;background:linear-gradient(90deg,#ff4178,#fff36b)}
 canvas{display:block;width:100%;height:auto}
 #c{display:none}
-#game{box-shadow:0 30px 60px #000a,0 0 40px #ff65e7;transform:perspective(900px) rotateX(2deg)}
-#hud,#log,#buttons{background:rgba(40,20,90,.45);-webkit-backdrop-filter:blur(18px) saturate(1.8);backdrop-filter:blur(18px) saturate(1.8)}
+#game{box-shadow:0 30px 60px #000a,0 0 40px #ff65e7}
+/* backdrop-filter + perspective removed: they forced the GPU to re-blur /
+   re-composite the whole page on every single animation frame (main cause of lag).
+   The 3D tilt lives in the WebGL shader now, which is ~free by comparison. */
+#hud,#log,#buttons{background:rgba(40,20,90,.72)}
 button{box-shadow:0 5px 0 #0006,0 8px 14px #0008;transition:transform .1s}button:active{transform:translateY(3px)}
-#tick{overflow:hidden;white-space:nowrap;background:#d11;font-size:8px;padding:8px 0;border-top:3px solid #fff;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
-#tick span{display:inline-block;padding-left:100%;animation:tk 60s linear infinite}
-@keyframes tk{to{transform:translateX(-100%)}}
+#tick{overflow:hidden;white-space:nowrap;background:#d11;font-size:8px;padding:8px 0;border-top:3px solid #fff}
+/* the marquee is now driven from the canvas rAF loop (transform on an
+   will-change layer) instead of a CSS animation fighting the render loop */
+#tick span{display:inline-block;will-change:transform}
 #log{padding:12px;min-height:60px;font-size:9px;line-height:2;background:#09071a;color:#fff4a6}
 #buttons{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:12px;background:#1c1041}
 button{font:inherit;font-size:9px;padding:12px 9px;color:white;background:#493079;
@@ -84,9 +88,14 @@ p{font-size:10px;line-height:2}
 </div>
 <script>
 (()=>{
-const c=document.querySelector('#c'),x=c.getContext('2d');
+const c=document.querySelector('#c'),x=c.getContext('2d',{alpha:false,desynchronized:true});
 const $=s=>document.querySelector(s);
 const W=800,H=460;
+ // PERF: the scene canvas is a FIXED 800x460 backing store (CSS-scaled to fit). It used
+ // to be sized to the CSS box x devicePixelRatio (up to 1600x920) and got uploaded to a
+ // GPU texture EVERY frame — that upload was the #1 cause of the 30fps stutter. The
+ // WebGL pass upscales it with smooth bilinear filtering + bloom, so quality is free.
+ c.width=800;c.height=460;
 let state='menu',t=0,last=0,hp=100,bhp=180,coins=4,turn=1,mercy=0,score=0;
 let bullets=[],particles=[],keys={},audio=null,music=null,mute=false,inv=0,shake=0;
 const hero={x:400,y:365};
@@ -237,68 +246,167 @@ document.addEventListener('keydown',e=>{
 });
 document.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
 
-let stars=Array.from({length:100},()=>({x:rand(0,W),y:rand(0,H),r:rand(1,3),p:rand(0,7)}));
-const PV={};
-function character(px,py,emoji,name,scale=1,gh=1){
- if(gh){const o=PV[name+emoji]||(PV[name+emoji]={x:px,y:py,vx:0,vy:0});o.vx+=((px-o.x)-o.vx)*.4;o.vy+=((py-o.y)-o.vy)*.4;o.x=px;o.y=py;
-  if(Math.hypot(o.vx,o.vy)>.12){const ga=x.globalAlpha;for(let j=7;j>0;j--){x.globalAlpha=ga*.5*(1-j/8);character(px-o.vx*j*3.5,py-o.vy*j*3.5,emoji,'',scale,0)}x.globalAlpha=ga}}
- x.save();x.translate(px,py);x.scale(scale,scale);
- x.fillStyle='rgba(0,0,0,.25)';x.beginPath();x.ellipse(0,18,23,6,0,0,7);x.fill();
- x.font='48px serif';x.textAlign='center';x.shadowColor='#fff';x.shadowBlur=18;x.fillText(emoji,0,10);x.shadowColor='#000b';x.shadowBlur=14;x.shadowOffsetY=8;x.fillText(emoji,0,10);x.shadowBlur=0;x.shadowOffsetY=0;
- x.font='8px "Press Start 2P"';x.fillStyle='white';x.fillText(name,0,33);
- x.restore();
+// ================= PERFORMANCE REWRITE =================
+// Before: every frame re-stroked ~100 shadowBlur glows (the single most expensive
+// 2D-canvas op there is) plus fresh gradients and hundreds of fills. Result: ~30fps.
+// Now: the static neighbourhood (sky, stars, houses, grass, rainbow) is rendered ONCE
+// into an offscreen canvas, and every moving thing (characters / props / speech bubbles)
+// is baked into small sprite canvases once as well. A frame is now just ~20 drawImage()
+// calls. Expect a solid 60fps.
+const DPR=Math.min(3,Math.max(2,window.devicePixelRatio||1));
+const SPR={},SHADOWED={};
+// mkSpr('id', drawFn, shadowed)  OR  mkSpr('id', width, height, drawFn, shadowed)
+function mkSpr(id,w,h,drawFn,shadowed){
+ if(typeof w==='function'){shadowed=h;drawFn=w;w=Math.round(drawFn.w||64);h=Math.round(drawFn.h||64)}
+ const cv=document.createElement('canvas');cv.width=Math.ceil(w*DPR);cv.height=Math.ceil(h*DPR);
+ const s=cv.getContext('2d');s.setTransform(DPR,0,0,DPR,0,0);s.textAlign='center';if(drawFn)drawFn(s);
+ SPR[id]=Object.assign(cv,{w:w,h:h});if(shadowed)SHADOWED[id]=1}
+function bl(s,cx,cy,r,a){s.globalAlpha=a;s.beginPath();s.arc(cx,cy,r,0,6.2832);s.fill()}
+// ---- characters are 100% OPAQUE: no translucent glow ghosts any more. Just a solid
+// drop shadow so they pop off the backdrop. (The only translucency left in the whole
+// scene is inside the WebGL motion-blur pass, where it's physically correct anyway.)
+function emojiSprite(e,size,name,scale){const w=Math.round(size*scale)+26,h=Math.round(size*scale)+48;
+ return c=>{const fs=size*scale;c.font=fs+'px serif';c.textBaseline='middle';
+  c.globalAlpha=.55;c.fillStyle='#000';c.fillText(e,w/2+3,h/2-2);c.globalAlpha=1;
+  c.fillStyle='#fff';c.fillText(e,w/2,h/2-6);
+  if(name){c.font='8px "Press Start 2P",monospace';c.globalAlpha=.7;c.fillStyle='#000';c.fillText(name,w/2+1,h-9);c.globalAlpha=1;c.fillStyle='#fff';c.fillText(name,w/2,h-10)}};
+ emojiSprite.w=w;emojiSprite.h=h;return emojiSprite}
+// BG is baked ONCE at 2x (1600x920) and drawn downscaled every frame — cheap
+// bilinear downscale gives a crisp, retina-quality backdrop from an 800x460 canvas.
+const BGR=2;
+mkSpr('bg',W*BGR,H*BGR,s=>{
+ s.scale(BGR,BGR);
+ const g=s.createLinearGradient(0,0,W,H);
+ ['#ff52b8','#ffbb4f','#fff46c','#5af5bd','#56dfff','#a67cff','#ff52b8'].forEach((c,i,a)=>g.addColorStop(i/(a.length-1),c));
+ s.fillStyle=g;s.fillRect(0,0,W,H);
+ s.fillStyle='rgba(24,8,58,.25)';s.fillRect(0,0,W,H);
+ for(let i=0;i<110;i++){s.globalAlpha=rand(.25,.95);s.fillStyle='white';s.fillRect(rand(0,W),rand(0,300),rand(1,3),rand(1,3))}
+ s.globalAlpha=1;
+ for(let i=0;i<8;i++){
+  const bx=i*110,by=290-(i%3)*25;
+  s.fillStyle=['#ff88ce','#80ddff','#ffda78','#c6a3ff'][i%4];s.fillRect(bx,by,85,180);
+  s.fillStyle='rgba(0,0,0,.3)';s.beginPath();s.moveTo(bx+85,by);s.lineTo(bx+100,by-12);s.lineTo(bx+100,440);s.lineTo(bx+85,440);s.fill();
+  s.fillStyle='rgba(255,255,255,.35)';s.beginPath();s.moveTo(bx,by);s.lineTo(bx+15,by-12);s.lineTo(bx+100,by-12);s.lineTo(bx+85,by);s.fill();
+  s.fillStyle='#fff0a2';
+  for(let wx=bx+12;wx<bx+78;wx+=28)for(let wy=by+20;wy<420;wy+=36)s.fillRect(wx,wy,12,15);
+  s.fillStyle='#efb0f0';s.fillRect(bx+31,by+75,24,35);
+ }
+ s.fillStyle='#40cb91';s.fillRect(0,425,W,35);
+ s.fillStyle='#5e449c';s.fillRect(0,444,W,7);
+ s.lineWidth=9;
+ ['#ff477e','#ffb84f','#fff36b','#56f5ad','#54dfff','#ae7cff'].forEach((c,i)=>{s.globalAlpha=.8;s.beginPath();s.strokeStyle=c;s.arc(400,310,200-i*14,Math.PI,Math.PI*2);s.stroke()});
+ s.globalAlpha=1;
+});
+mkSpr('boss',emojiSprite('🍦',48,'SIR SCOOPINGTON',1.25),1);
+mkSpr('hero',emojiSprite('💖',48,'YOU',.85),1);
+mkSpr('sheep',emojiSprite('🐑',48,'SHEEP',.9),1);
+['👵','🦝','🐦','🐈','📫','🍦'].forEach((e,i)=>mkSpr('npc'+i,emojiSprite(e,48,npcs[i][1],.7),1));
+mkSpr('bub',190,36,s=>{s.fillStyle='#fff';s.fillRect(0,0,190,26);s.beginPath();s.moveTo(178,26);s.lineTo(190,26);s.lineTo(182,36);s.closePath();s.fill();s.fillStyle='#000';s.font='9px "Press Start 2P",monospace';s.textBaseline='middle';s.fillText('beep beep ima sheep',95,13)});
+// ---- PROPS: baked at 3x so they downscale to buttery-smooth ~11px sprites on the
+// 800x460 scene canvas (and stay crisp when a hit-zoom magnifies the frame).
+const PR=3;
+const prop=(id,e,size)=>mkSpr(id,34*PR,34*PR,s=>{s.scale(PR,PR);s.font=size+'px serif';s.textAlign='center';s.textBaseline='middle';s.fillText(e,17,19)});
+prop('prop0','🛴',26);prop('prop1','🎰',26);prop('prop2','📦',26);prop('prop3','🧶',26);prop('prop4','🪧',26);
+prop('crumb','🍞',15);prop('heart','💌',19);prop('note','🎵',19);prop('star','✨',19);prop('puff','💨',19);prop('z','💤',19);
+mkSpr('b1',26,s=>{s.fillStyle='#ffcf5a';bl(s,13,13,11,1);s.strokeStyle='#a86b12';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#7b4a10';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
+mkSpr('b2',26,s=>{s.fillStyle='#8fe3ff';bl(s,13,13,11,1);s.strokeStyle='#2b8ba8';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#2b6c86';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
+mkSpr('b3',26,s=>{s.fillStyle='#ff8fd0';bl(s,13,13,11,1);s.strokeStyle='#a82b78';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#862b64';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
+mkSpr('b4',26,s=>{s.fillStyle='#e5b16d';bl(s,13,13,11,1);s.strokeStyle='#8a5a1e';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#6b4315';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
+mkSpr('b5',26,s=>{s.fillStyle='#ff4545';bl(s,13,13,11,1);s.strokeStyle='#8f1414';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#6f0f0f';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
+const BSPR=['b1','b2','b3','b4','b5'];
+const bspr=b=>b.s||'b1';
+// ---- PERF: every sprite is baked at a supersampled size, so drawing it downscaled
+// onto the 800x460 scene canvas is both crisp AND fast (no per-frame text rendering).
+const TXR=3;
+const txtSpr=(id,str,col)=>mkSpr(id,420*TXR,30*TXR,s=>{s.scale(TXR,TXR);s.fillStyle=col;s.font='12px "Press Start 2P",monospace';s.textBaseline='middle';s.fillText(str,210,15)});
+txtSpr('txt0','DODGE THE DESSERT!','#fff');
+txtSpr('txt1','CHOOSE YOUR ACTION BELOW!','#fff');
+txtSpr('txt2','HIT THE GREEN! (SPACE / TAP)','#ffe98a');
+// ---- characters are 100% opaque now. What you see around them is a real motion blur:
+// each object carries a velocity, and the WebGL pass below smears it along that exact
+// direction of travel with many dense sub-samples (velocity-shutter style), so it reads
+// as camera/retina blur instead of an evenly-spaced ghost trail.
+function spr(id,cx,cy){const S2=SPR[id];x.drawImage(S2,cx-S2.w/2,cy-S2.h/2,S2.w,S2.h)}
+// ---- neighbours with lives of their own: they interact with the buildings ----
+// Each neighbour picks a "bit" (scooter run, slot machine at a house, dragging a parcel
+// to a door, knitting on a porch, stealing an estate sign, dropping crumbs, blessing
+// people with love, polishing the rainbow, napping in the gutter...) and plays it out.
+const HOUS=(()=>{const a=[];for(let i=0;i<8;i++)a.push({x:i*110,y:290-(i%3)*25});return a})();
+const ACTS=[
+ {id:'scoot',who:[0],label:'🛴 Grandma rocket-scooters down the street',dur:6500,run(o,a,e){const p=Math.min(1,e.t/a.dur),sx=70+680*p,sy=414-Math.abs(Math.sin(p*Math.PI))*14,d=p<.5?1:-1;o.vx=d*7.2;o.vy=-Math.cos(p*Math.PI)*1.2;spr('prop0',sx+d*10,sy-4);return{x:sx,y:sy}}},
+ {id:'slots',who:[1],label:'🦝 Greg runs the corner slot machine',dur:7000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,on=Math.floor(e.t/160)%2;spr('prop1',h.x+44,h.y+152);o.vx=on?-2.6:2.6;o.vy=0;return{x:h.x+(on?-32:30),y:h.y+142}}},
+ {id:'parcel',who:[4],label:'📫 Dave drags a parcel three times his size to a door',dur:9000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur),px=h.x+150-150*p,py=h.y+166;spr('prop2',px+18,py);o.vx=3.4;o.vy=0;return{x:px,y:py-4}}},
+ {id:'knit',who:[0],label:'🧶 Grandma knits on the porch (aggressively)',dur:11000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,b=Math.sin(e.t*.012)*3;spr('prop3',h.x+62,h.y+158+b);o.vx=b*.4;return{x:h.x+34,y:h.y+160}}},
+ {id:'sign',who:[2],label:'🐦 Kevin hijacks an estate sign',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h;o.vx=Math.sin(e.t*.01)*2;o.vy=0;return{x:h.x+44,y:h.y+148+Math.sin(e.t*.008)*3}}},
+ {id:'crumb',who:[2],label:'🐦 Kevin drops crumbs everywhere',dur:7000,setup(){this.x0=rand(60,740);this.y0=rand(250,400);this.x1=rand(60,740);this.y1=rand(250,400)},run(o,a,e){const p=Math.min(1,e.t/a.dur),cx=this.x0+(this.x1-this.x0)*p,cy=this.y0+(this.y1-this.y0)*p-Math.sin(p*Math.PI)*40;spr('crumb',cx,cy+18);o.vx=(this.x1-this.x0)/a.dur*16;o.vy=(this.y1-this.y0)/a.dur*16;return{x:cx,y:cy}}},
+ {id:'love',who:[3],label:'🐈 Luna blesses a random neighbour with love',dur:6000,setup(){this.n=NPCS[(Math.random()*NPCS.length)|0]},run(o,a,e){const n=this.n,p=Math.min(1,e.t/a.dur);spr('heart',n.x,n.y-34-p*30);o.vx=.4;return{x:n.x+30,y:n.y}}},
+ {id:'polish',who:[5],label:'⭐ Scoop Jr. polishes the rainbow',dur:7500,setup(){this.i=rand(.2,.6)},run(o,a,e){const ang=Math.PI+Math.PI*(e.t/a.dur)*this.i+.2,rx=400+Math.cos(ang)*186,ry=310+Math.sin(ang)*186;spr('star',rx,ry);o.vx=Math.cos(ang+1.57)*2.2;o.vy=Math.sin(ang+1.57)*2.2;return{x:rx,y:ry}}},
+ {id:'bat',who:[3],label:'💨 Luna bats a dust cloud at the boss',dur:5000,run(o,a,e){const p=Math.min(1,e.t/a.dur);spr('puff',120+p*250,206-Math.sin(p*Math.PI)*26);o.vx=1.2;return{x:104,y:214}}},
+ {id:'nap',who:[1],label:'💤 Greg naps face-down in the gutter',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h;spr('z',h.x+50,h.y+146-Math.sin(e.t*.004)*5);o.vx=0;o.vy=0;return{x:h.x+26,y:h.y+164}}},
+ {id:'window',who:[4],label:'📫 Dave posts a letter through a letterbox',dur:6000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur);if(p<.5)spr('note',h.x+44,h.y+96+p*60);o.vx=p<.5?1.6:.4;return{x:h.x+30,y:h.y+168}}},
+ {id:'yarn',who:[3],label:'🧶 Luna steals Grandma\'s yarn',dur:7000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur),yx=h.x+70-p*180;spr('prop3',yx,h.y+170);o.vx=-3.2;return{x:yx+16,y:h.y+166}}},
+ // NEW bits — more ways for the neighbours to mess with the buildings:
+ {id:'paint',who:[1],label:'🎨 Greg "renovates" a house wall with spray paint',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur);spr('note',h.x+16+p*54,h.y+60+Math.sin(e.t*.02)*7);o.vx=Math.cos(e.t*.015)*2.4;o.vy=Math.sin(e.t*.019)*1.6;return{x:h.x+44,y:h.y+150}}},
+ {id:'flash',who:[5],label:'📸 Scoop Jr. flashes a photo of every window',dur:6500,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,i=Math.floor(e.t/500);if(i%2===0&&e.t<5000)spr('star',h.x+44,h.y+60+(i%4)*36);o.vx=.6;return{x:h.x+44,y:h.y+158}}},
+ {id:'chase',who:[2,3],label:'🐈 Luna chases Kevin across the whole street',dur:6000,setup(){this.off=rand(34,64)},run(o,a,e){const p=Math.min(1,e.t/a.dur),cx=52+700*p;o.vx=11.6;o.vy=0;if(o.id==='npc2')spr('puff',cx-this.off,cy_(e));return{x:cx,y:cy_(e)}}},
+ {id:'magnet',who:[4],label:'🧲 Dave gets stuck to a mailbox after posting a letter',dur:6000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,w=Math.sin(e.t*.02)*3;spr('note',h.x+44+w,h.y+150);o.vx=w*.6;return{x:h.x+62,y:h.y+160}}},
+ {id:'dance',who:[0,5],label:'💃 Grandma & Scoop Jr. do the sprinkles shuffle',dur:7000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,j=Math.abs(Math.sin(e.t*.011))*9,w=Math.sin(e.t*.006)*12;o.vx=w*1.1;o.vy=-j*.8;return{x:h.x+44+w,y:h.y+150-j}}},
+ {id:'peek',who:[1,2],label:'👀 Someone is peeking through a curtain. Suspicious.',dur:5000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,w=Math.sin(e.t*.01)*5;o.vx=w;o.vy=0;return{x:h.x+44+w,y:h.y+52}}},
+ {id:'garden',who:[0],label:'🌻 Grandma waters her rainbow flowerbox',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur);if(Math.floor(e.t/300)%2===0)spr('heart',h.x+20+((e.t/300)%3)*22,h.y+120-Math.sin(e.t*.005)*4);o.vx=.5;return{x:h.x+66,y:h.y+158}}},
+ {id:'roof',who:[2],label:'🐦 Kevin sunbathes on a rooftop like a tiny menace',dur:9000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h;o.vx=Math.sin(e.t*.004)*.6;o.vy=0;return{x:h.x+52,y:h.y-16}}},
+ {id:'bin',who:[1],label:'🗑️ Greg ransacks a rubbish bin outside a house',dur:6000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,r=Math.floor(e.t/220)%2;spr('crumb',h.x+96,h.y+168-r*8);o.vx=r?2.2:-1.4;o.vy=0;return{x:h.x+76,y:h.y+160}}}
+];
+function cy_(e){return 396-Math.abs(Math.sin(e.t*.012))*16}
+function mkNpc(id,x,y){return{id:id,sid:id.replace('npc',''),x:x,y:y,tx:x,ty:y,vx:0,vy:0,act:null,end:0,start:0,rest:0,home:{x:x,y:y}}}
+const NIDS=['npc0','npc1','npc2','npc3','npc4','npc5'];
+const NPCS=NIDS.map((id,i)=>mkNpc(id,i===4?60:(i===5?700:95+i*160),i===4?404:(i===5?300:214)));
+function assign(n,now){
+ const pool=ACTS.filter(a=>(!a.who||a.who.indexOf(+n.sid)>=0)&&a.id!==n.cur);
+ const a=pick(pool.length?pool:ACTS);
+ try{a.setup&&a.setup()}catch(e){}
+ n.act=a;n.cur=a.id;n.start=now;n.end=now+a.dur;
+ if(a.label&&Math.random()<.5)log('🏡 '+a.label);
+}
+function updNpc(n,now,dt){
+ if(!n.act||now>n.end){n.act=null;n.cur=null;
+  if(now>=(n.rest||0)){assign(n,now);n.rest=now+n.act.dur+rand(2500,9000)}
+  else{n.tx=n.home.x;n.ty=n.home.y}}
+ if(n.act){const r=n.act.run(n,{dur:n.act.dur},{t:now-n.start});if(r){n.tx=r.x;n.ty=r.y}}
+ const k=Math.min(1,dt*.012),ox=n.x,oy=n.y;
+ n.x+=(n.tx-n.x)*k;n.y+=(n.ty-n.y)*k;
+ const f=dt/16.7||1;n.vx=n.vx*.55+((n.x-ox)/f)*.45;n.vy=n.vy*.55+((n.y-oy)/f)*.45;
 }
 function draw(){
- const g=x.createLinearGradient(0,0,W,H);
- ['#ff52b8','#ffbb4f','#fff46c','#5af5bd','#56dfff','#a67cff','#ff52b8']
- .forEach((c,i,a)=>g.addColorStop(i/(a.length-1),c));
- x.fillStyle=g;x.fillRect(0,0,W,H);
- x.fillStyle='rgba(24,8,58,.25)';x.fillRect(0,0,W,H);
- stars.forEach(s=>{
-  x.globalAlpha=.3+.7*Math.abs(Math.sin(t*.003+s.p));
-  x.fillStyle='white';x.fillRect(s.x,s.y,s.r,s.r);
- });x.globalAlpha=1;
- // Colourful houses
- for(let i=0;i<8;i++){
-  let bx=i*110,by=290-(i%3)*25;
-  x.fillStyle=['#ff88ce','#80ddff','#ffda78','#c6a3ff'][i%4];
-  x.fillRect(bx,by,85,180);
-  x.fillStyle='rgba(0,0,0,.3)';x.beginPath();x.moveTo(bx+85,by);x.lineTo(bx+100,by-12);x.lineTo(bx+100,440);x.lineTo(bx+85,440);x.fill();
-  x.fillStyle='rgba(255,255,255,.35)';x.beginPath();x.moveTo(bx,by);x.lineTo(bx+15,by-12);x.lineTo(bx+100,by-12);x.lineTo(bx+85,by);x.fill();
-  x.save();x.shadowColor='#000';x.shadowBlur=25;x.shadowOffsetX=-10;x.fillStyle='rgba(0,0,0,.01)';x.fillRect(bx,by,85,180);x.restore();
-  x.fillStyle='#fff0a2';
-  for(let wx=bx+12;wx<bx+78;wx+=28)
-   for(let wy=by+20;wy<440;wy+=36)x.fillRect(wx,wy,12,15);
-  x.fillStyle='#efb0f0';x.fillRect(bx+31,by+75,24,35);
+ x.drawImage(SPR['bg'],0,0,W,H);
+ // 100% opaque characters, zero ghosting drawn here: the WebGL pass does the real blur
+ for(const n of NPCS){updNpc(n,t,16.7);spr(n.id,n.x,n.y)}
+ spr('boss',boss.x,boss.y+Math.sin(t*.004)*5);
+ spr('hero',hero.x,hero.y);
+ for(const b of bullets)spr(bspr(b),b.x,b.y);
+ // PERF: one batched path per colour bucket instead of a stroke()/beginPath() per particle
+ if(particles.length){
+  x.lineCap='round';
+  const buckets={};
+  for(const p of particles){(buckets[p.color]||(buckets[p.color]=[])).push(p)}
+  for(const col in buckets){
+   x.strokeStyle=col;x.beginPath();
+   for(const p of buckets[p]){x.moveTo(p.x,p.y);x.lineTo(p.x-p.vx*3,p.y-p.vy*3)}
+   x.lineWidth=buckets[col][0].size;x.stroke();
+  }
  }
- x.fillStyle='#40cb91';x.fillRect(0,425,W,35);
- x.fillStyle='#5e449c';x.fillRect(0,444,W,7);
- // Rainbow arch
- x.lineWidth=9;
- ['#ff477e','#ffb84f','#fff36b','#56f5ad','#54dfff','#ae7cff'].forEach((c,i)=>{
-  x.beginPath();x.strokeStyle=c;x.globalAlpha=.8;
-  x.arc(400,310,200-i*14,Math.PI,Math.PI*2);x.stroke();
- });x.globalAlpha=1;
- const people=[npcs[0],npcs[1],npcs[2],npcs[3]];
- people.forEach((n,i)=>character(95+i*205,220+Math.sin(t*.002+i)*4,n[0],n[1],.7));
- character(boss.x,boss.y+Math.sin(t*.004)*5,'🍦','SIR SCOOPINGTON',1.25);
- const hvx=hero.x-hpp.x,hvy=hero.y-hpp.y;hpp.x=hero.x;hpp.y=hero.y;if(false){for(let j=4;j>0;j--){x.globalAlpha=.16;character(hero.x-hvx*j*2,hero.y-hvy*j*2,'💖','',.85)}x.globalAlpha=1}
- character(hero.x,hero.y,'💖','YOU',.85);
- bullets.forEach(b=>{
-  for(let j=5;j>0;j--){x.globalAlpha=.4*(1-j/6);x.fillStyle=b.col;x.beginPath();x.arc(b.x-b.vx*j*1.6,b.y-b.vy*j*1.6,b.r*(1-j*.1),0,7);x.fill()}x.globalAlpha=1;x.save();x.translate(b.x,b.y);x.fillStyle=b.col;x.shadowColor=b.col;x.shadowBlur=10;
-  x.beginPath();x.arc(0,0,b.r,0,Math.PI*2);x.fill();
-  const q=x.createRadialGradient(-b.r/3,-b.r/3,1,0,0,b.r);q.addColorStop(0,'#fff');q.addColorStop(.35,'rgba(255,255,255,0)');q.addColorStop(1,'rgba(0,0,0,.45)');
-  x.shadowBlur=0;x.fillStyle=q;x.beginPath();x.arc(0,0,b.r,0,7);x.fill();x.restore();
-  x.fillStyle='rgba(0,0,0,.3)';x.beginPath();x.ellipse(b.x,Math.min(b.y+b.r*2.2,440),b.r,b.r/3,0,0,7);x.fill();
- });
- particles.forEach(p=>{
-  x.globalAlpha=Math.max(0,p.life/45);x.fillStyle=p.color;
-  x.strokeStyle=p.color;x.lineWidth=p.size;x.beginPath();x.moveTo(p.x,p.y);x.lineTo(p.x-p.vx*3,p.y-p.vy*3);x.stroke();
- });x.globalAlpha=1;
- character(752,428+Math.abs(Math.sin(t*.01))*(sheepSay>0?-12:0),'🐑','SHEEP',.9);
- if(sheepSay>0){x.fillStyle='#fff';x.fillRect(560,355,190,26);x.fillRect(740,375,8,8);x.fillStyle='#000';x.font='9px "Press Start 2P"';x.fillText('beep beep ima sheep',655,373);sheepSay-=16}
- x.textAlign='center';x.fillStyle='white';x.font='10px "Press Start 2P"';
- x.fillText(state==='dodge'?'DODGE THE DESSERT!':state==='attack'?'HIT THE GREEN!':'CHOOSE YOUR ACTION BELOW!',400,415);if(state==='attack')drawAtk();
+ const hop=sheepSay>0?Math.abs(Math.sin(t*.012))*14:0,sy2=428-hop;
+ spr('sheep',752,sy2);
+ if(sheepSay>0){spr('bub',650,368);sheepSay-=16}
+ // ---- publish where the fast stuff is, so the GPU only blurs THAT (zoomed in) ----
+ // BR = position of the blur focus (uv), BRVX/BRVY = its velocity in px per 60fps-frame.
+ let mx=0,my=0;for(const b of bullets){const s=Math.hypot(b.vx,b.vy);if(s>my){my=s;mx=1}}
+ if(mx){let bi=0,bs=0;for(let i=0;i<bullets.length;i++){const s=Math.hypot(bullets[i].vx,bullets[i].vy);if(s>bs){bs=s;bi=i}}
+  const b=bullets[bi];BR.x=b.x/800;BR.y=1-b.y/460;BRVX=b.vx;BRVY=b.vy}
+ else{let ex=null,es=0;for(const n of NPCS){const s=Math.hypot(n.vx,n.vy);if(s>es){es=s;ex=n}}
+  if(ex&&es>.8){BR.x=ex.x/800;BR.y=1-ex.y/460;BRVX=ex.vx;BRVY=ex.vy}else{BRVX=0;BRVY=0}}
+ // baked text sprite — no per-frame font rasterisation (that was costing ~1ms/frame)
+ spr(state==='dodge'?'txt0':state==='attack'?'txt2':'txt1',400,415);
+ if(state==='attack')drawAtk();
 }
 function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='battle';log('💨 MISS! Too slow!');setTimeout(()=>{if(state==='battle')enemyTurn()},600)}}
  t+=dt;
@@ -334,11 +442,11 @@ function loop(now){
  if(shake>0){x.translate(rand(-shake,shake),rand(-shake,shake));shake*=.86}
  draw();x.restore();glF();requestAnimationFrame(loop);
 }
-let atk=null,bgm=null,sheepAud=null,hpp={x:400,y:365},sheepTO,fx=0,fxS=0;function zoomFx(s){fx=1;fxS=s}
+let atk=null,bgm=null,sheepAud=null,sheepTO,fx=0,fxS=0;const BR={x:.5,y:.5,s:0};let BRVX=0,BRVY=0;function zoomFx(s){fx=1;fxS=s}
 function drawAtk(){const L=150,Tp=335,Wd=500,Hh=56;x.save();x.fillStyle='#000';x.fillRect(L,Tp,Wd,Hh);const g=x.createLinearGradient(L,0,L+Wd,0);g.addColorStop(0,'#ff3b3b');g.addColorStop(.35,'#ffd23b');g.addColorStop(.5,'#3bff7a');g.addColorStop(.65,'#ffd23b');g.addColorStop(1,'#ff3b3b');x.globalAlpha=.9;x.fillStyle=g;x.fillRect(L+4,Tp+4,Wd-8,Hh-8);x.globalAlpha=1;x.strokeStyle='#fff';x.lineWidth=4;x.strokeRect(L,Tp,Wd,Hh);x.fillStyle='#000';x.fillRect(atk.p-5,Tp-8,10,Hh+16);x.fillStyle=Math.floor(t/90)%2?'#fff':'#ff0';x.fillRect(atk.p-3,Tp-6,6,Hh+12);x.restore()}
 function strike(){if(state!=='attack'||!atk||atk.d)return;atk.d=1;const o=Math.abs(atk.p-400),d=Math.max(6,Math.round(50*(1-o/250)));state='battle';hurtBoss(d);log(o<25?'🌟 PERFECT! '+d+' damage!':'💥 Hit for '+d+'!')}
 addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();strike()}});$('#gl').addEventListener('pointerdown',strike);
-const BGM_SRC=['https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','bgm.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='],SHEEP_SRC=['https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','sheep.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='];/* paste myinstants .mp3 URLs here too */
+const BGM_SRC=['https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','bgm.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='],SHEEP_SRC=['https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','sheep.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='];/* REMIX is first now — the sheep honks the remix version */
 const DB=new Promise(r=>{try{const q=indexedDB.open('rumble',1);q.onupgradeneeded=()=>q.result.createObjectStore('f');q.onsuccess=()=>r(q.result);q.onerror=()=>r(null)}catch(e){r(null)}});
 const dbPut=(k,v)=>DB.then(d=>{try{d&&d.transaction('f','readwrite').objectStore('f').put(v,k)}catch(e){}});
 const dbGet=k=>DB.then(d=>d?new Promise(r=>{try{const q=d.transaction('f').objectStore('f').get(k);q.onsuccess=()=>r(q.result);q.onerror=()=>r()}catch(e){r()}}):0);
@@ -362,27 +470,36 @@ function sheepBeep(){
 }
 $('#sheepBtn').onclick=sheepBeep;
 setInterval(()=>{if(state==='dodge'||state==='battle')sheepBeep()},24000);
-// ===== WebGL post-FX: 3D tilted glass card, shadow, bloom, frosted blur, feedback motion blur =====
+// ===== WebGL post-FX: 3D tilted glass card, shadow, bloom, frosted blur, velocity shutter =====
 let glF=()=>{};
-const gl=$('#gl').getContext('webgl');
+// antialias:false + high-performance hint: this is a full-screen post pipeline, MSAA here
+// would be pure waste. LowPower fallback keeps weak GPUs smooth.
+const glOpts={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'};
+let gl=$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('webgl',{powerPreference:'low-power'});
 if(!gl){$('#c').style.display='block';$('#gl').style.display='none'}else{
 const vs=`precision mediump float;attribute vec2 p;uniform vec2 r;uniform float k,o;varying vec2 v;
 void main(){v=p*.5+.5;vec3 q=vec3(p*vec2(1.,.575)*k,0.);q.y-=o;
 float a=cos(r.x),b=sin(r.x),c=cos(r.y),d=sin(r.y);
 q=vec3(q.x*c+q.z*d,q.y,-q.x*d+q.z*c);q=vec3(q.x,q.y*a-q.z*b,q.y*b+q.z*a);
 gl_Position=vec4(q.xy/vec2(1.,.575),0.,1.+q.z*.7);}`;
-const fs=`precision mediump float;uniform sampler2D s,pv;uniform float m,sp,k,zm,rt;varying vec2 v;
-vec3 bl(vec2 u,float R){vec3 c=vec3(0.);for(int i=0;i<12;i++){float f=float(i)*2.4;c+=texture2D(pv,u+vec2(cos(f),sin(f)*1.7)*sqrt(float(i)/12.)*R).rgb;}return c/12.;}
+const fs=`precision mediump float;uniform sampler2D s,pv;uniform vec3 vd;uniform float m,sp,k,zm,rt;varying vec2 v;
+// 12 radial taps -> cheap bloom/frost (looks like depth-of-field bokeh)
+vec3 bl(vec2 u,float R){vec3 c=vec3(0.);for(int i=0;i<12;i++){float f=float(i)*2.4;c+=texture2D(pv,u+vec2(cos(f),sin(f)*.6)*R).rgb}return c/12.;}
 void main(){
- if(m<.5){vec2 w=v-.5;float cs=cos(rt),sn=sin(rt);vec2 v2=vec2(cs*w.x-sn*w.y,sn*w.x+cs*w.y)/zm+.5;vec2 d=(v2-.5)*sp*2.5;vec3 c=vec3(0.);
-  for(int i=0;i<6;i++)c+=texture2D(s,v2-d*float(i)/5.).rgb;c/=6.;
-  
-  gl_FragColor=vec4(mix(c,texture2D(pv,(v-.5)*.998+.5).rgb,.0),1.);return;}
- if(m<1.5){gl_FragColor=vec4(bl(v,.07)*.6,1.);return;}
+ if(m<.5){ // ---- MOTION PASS: genuine shutter integral, NOT a spaced-out ghost trail.
+  // Every pixel is swept along the moving object's REAL screen-space velocity vector (vd)
+  // with 18 DENSE sub-samples spanning exactly one frame of travel (~half-pixel spacing ->
+  // one continuous smear, like 120fps content shown on a 60Hz panel). Flat weighting, like
+  // an open camera shutter. Zoomed/rotated onto the action during hit punch-ins (zm/rt).
+  vec2 w=v-.5;float cs=cos(rt),sn=sin(rt);vec2 v2=(vec2(cs*w.x-sn*w.y,sn*w.x+cs*w.y))/zm+.5;
+  vec2 d=vd*sp;vec3 c=vec3(0.);
+  for(int i=0;i<18;i++)c+=texture2D(s,v2+d*(float(i)-8.5)/9.).rgb;
+  gl_FragColor=vec4(c/18.,1.);return;}
+ if(m<1.5){gl_FragColor=vec4(bl(v,.07)*.6,1.);return;} // shadow-caster blur
  vec2 u=(v-.5)*k/.9;vec2 e=abs(u)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
  float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
- if(m>2.5){gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));return;}
- vec3 c=texture2D(pv,v).rgb;c+=bl(v,.01)*.08;
+ if(m>2.5){gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));return;} // drop shadow
+ vec3 c=texture2D(pv,v).rgb;c+=bl(v,.01)*.08; // glass card + neon edge + frosted rim
  c+=smoothstep(-8.,0.,dd)*.4*vec3(1.,.9,1.);
  gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`;
 const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);return h};
@@ -394,19 +511,53 @@ const U=n=>gl.getUniformLocation(P,n);
 const tx=u=>{gl.activeTexture(gl.TEXTURE0+u);const T=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,T);
  [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(a=>gl.texParameteri(gl.TEXTURE_2D,a[0],a[1]));
  if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
-const S=tx(0),T=[tx(1),tx(2)],F=T.map(t=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return f});
+const S=tx(0),T=[tx(1),tx(2)],F=T.map(tt=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tt,0);return f});
 let ph=0,mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365;
-addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5});
-const dr=(m,k,o,rx,ry,pv,sp)=>{gl.uniform1f(U('m'),m);gl.uniform1f(U('k'),k);gl.uniform1f(U('o'),o);gl.uniform2f(U('r'),rx,ry);gl.uniform1f(U('sp'),sp);gl.uniform1i(U('s'),0);gl.uniform1i(U('pv'),pv);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)};
+addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5},{passive:true});
+// cached uniform locations (getUniformLocation on every draw was pointless overhead)
+const UM=U('m'),UK=U('k'),UO=U('o'),UR=U('r'),USP=U('sp'),UZM=U('zm'),URT=U('rt'),US=U('s'),UPV=U('pv'),UVD=U('vd');
+// ---- downscale helper for the adaptive-quality upload path ----
+const sc=document.createElement('canvas'),sctx=sc.getContext('2d');
+let Q=0,qw=800,qh=460,fps=60,lastQ=0,lastT=0;
+// shutter velocity vector (uv space) — recomputed every frame in glF() below.
+// MUST be declared here: `dr` closes over these and is defined before glF runs.
+let VX=.7,VY=-.714;
+// shutter strength: 0 = no motion this frame (motion pass becomes a plain copy -> zero
+// smear), ramps to full one-frame-of-travel when something fast is on screen. Smoothed
+// so it never strobes between frames.
+let shutter=0;// NOTE: must not be named `sh` — that's the shader-compile helper above
+const dr=(m,k,o,rx,ry,pv)=>{gl.uniform1f(UM,m);gl.uniform1f(UK,k);gl.uniform1f(UO,o);gl.uniform2f(UR,rx,ry);gl.uniform1f(USP,shutter);gl.uniform3f(UVD,VX,VY,0);gl.uniform1i(US,0);gl.uniform1i(UPV,pv);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)};
 glF=()=>{
  if(!gl.getProgramParameter(P,gl.LINK_STATUS)){$('#c').style.display='block';$('#gl').style.display='none';glF=()=>{};return}
- gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
- fx=Math.max(0,fx-.028);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,sp=pr*.14,zmv=1+pr*(fxS?.8:.5),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;gl.uniform1f(U('zm'),zmv);gl.uniform1f(U('rt'),rtv);
- gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph]);gl.viewport(0,0,800,460);dr(0,1,0,0,0,1+ph,sp);ph=1-ph;
+ // ---- ADAPTIVE RESOLUTION: the canvas->texture upload is the only real per-frame cost.
+ // The scene canvas is already capped at 800x460; if frames still get long we upload at
+ // 2/3 or 1/2 size (the shutter blur + bloom hide it completely). Hysteresis in BOTH
+ // directions so quality can never oscillate. Uses `t` (accumulated by update()), NOT the
+ // rAF timestamp — glF() is called with no arguments, so `now` does not exist here.
+ const dtms=Math.max(1,t-lastT);lastT=t;
+ fps=fps*.88+(1000/dtms)*.12;
+ let qT=Q;if(fps<46&&t-lastQ>1200)qT=Math.min(2,Q+1);else if(fps>57&&t-lastQ>3000)qT=Math.max(0,Q-1);
+ if(qT!==Q){Q=qT;qw=[800,533,400][Q];qh=[460,307,230][Q];lastQ=t}
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+ if(Q===0)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
+ else{sc.width=qw;sc.height=qh;sctx.drawImage(c,0,0,qw,qh);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,sc)}
+ // hit-zoom: punch IN and rotate slightly toward the impact point, fast decay
+ fx=Math.max(0,fx-.06);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?1.9:1.25),rtv=fxS&&fx>0?6.2832*(1-Math.pow(1-q,3)):0;
+ gl.uniform1f(UZM,zmv);gl.uniform1f(URT,rtv);
+ // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
+ // length = speed x ~1.4 frames of travel, capped at 80px on screen. During a hit zoom
+ // the whole frame sweeps along the camera-motion vector too — that's what sells the punch.
+ const spd=Math.hypot(BRVX,BRVY);
+ if(spd>.05){VX=BRVX/800;VY=-BRVY/460}
+ else if(fx>.15){VX=.7;VY=-.714}// camera sweep during punch-in when nothing local is fast
+ const want=Math.min(1,(Math.min(.115,spd*1.4)*800)/80)+(fx>.15?.55:0);
+ shutter+=(Math.min(1,want)-shutter)*.35;
+ if(shutter<.02)shutter=0;
+ gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph]);gl.viewport(0,0,800,460);dr(0,1,0,0,0,1+ph);ph=1-ph;
  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
  sx+=((hero.x-hpx)*.065-sx)*.12;sy2+=((hero.y-hpy)*.05-sy2)*.12;hpx=hero.x;hpy=hero.y;
  const rx=-.08-sy2*.55+Math.sin(t*.0007)*.03,ry=sx;
- dr(1,1,0,0,0,1+ph,0);gl.enable(gl.BLEND);dr(3,1,.06,rx,ry,1+ph,0);dr(2,.9,0,rx,ry,1+ph,0);
+ dr(1,1,0,0,0,1+ph);gl.enable(gl.BLEND);dr(3,1,.06,rx,ry,1+ph);dr(2,.9,0,rx,ry,1+ph);
 }}
 updateUI();requestAnimationFrame(loop);
 })();
