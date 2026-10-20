@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -22,18 +21,13 @@ body{
 .bar{width:130px;max-width:100%;height:12px;border:2px solid white;background:#52213d}
 .fill{height:100%;background:linear-gradient(90deg,#ff4178,#fff36b)}
 canvas{display:block;width:100%;height:auto}
-/* #c is the offscreen scene canvas — display:none keeps it out of layout but its
-   pixels stay fully rendered, because WebGL uploads it via texImage2D every frame. */
-#c{display:none}
-#game{box-shadow:0 30px 60px #000a,0 0 40px #ff65e7}
-/* backdrop-filter + perspective removed: they forced the GPU to re-blur /
-   re-composite the whole page on every single animation frame (main cause of lag).
-   The 3D tilt lives in the WebGL shader now, which is ~free by comparison. */
+/* #c = offscreen scene canvas (never displayed; uploaded to a GL texture per frame).
+   #gl = visible FX layer, composited ON TOP of #c. */
+#c{position:absolute;inset:0;z-index:1}
+#gl{position:absolute;inset:0;z-index:2;pointer-events:none}
 #hud,#log,#buttons{background:rgba(40,20,90,.72)}
 button{box-shadow:0 5px 0 #0006,0 8px 14px #0008;transition:transform .1s}button:active{transform:translateY(3px)}
 #tick{overflow:hidden;white-space:nowrap;background:#d11;font-size:8px;padding:8px 0;border-top:3px solid #fff}
-/* the marquee is now driven from the canvas rAF loop (transform on an
-   will-change layer) instead of a CSS animation fighting the render loop */
 #tick span{display:inline-block;will-change:transform}
 #log{padding:12px;min-height:60px;font-size:9px;line-height:2;background:#09071a;color:#fff4a6}
 #buttons{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:12px;background:#1c1041}
@@ -90,18 +84,14 @@ p{font-size:10px;line-height:2}
 </div>
 <script>
 (()=>{
-const c=document.querySelector('#c'),x=c.getContext('2d',{alpha:false,desynchronized:true});
+const c=document.querySelector('#c'),x=c.getContext('2d',{alpha:false});
 const $=s=>document.querySelector(s);
 const W=800,H=460;
- // PERF: the scene canvas is a FIXED 800x460 backing store (CSS-scaled to fit). It used
- // to be sized to the CSS box x devicePixelRatio (up to 1600x920) and got uploaded to a
- // GPU texture EVERY frame — that upload was the #1 cause of the 30fps stutter. The
- // WebGL pass upscales it with smooth bilinear filtering + bloom, so quality is free.
- c.width=800;c.height=460;
+// scene canvas is FIXED 800x460 backing store, CSS-upscaled — never size it to DPR
+c.width=W;c.height=H;
 let state='menu',t=0,last=0,hp=100,bhp=180,coins=4,turn=1,mercy=0,score=0;
 let bullets=[],keys={},audio=null,music=null,mute=false,inv=0,shake=0;
-// LIGHTER PARTICLES: fixed-size pool + swap-remove cull. Zero allocations per frame,
-// zero GC pauses (GC spikes were a real source of the mid-fight 'crashes'/stutters).
+// particles: fixed pool + swap-remove (allocation-free frames, no GC hitches)
 const particles=[];let pFree=[];
 const hero={x:400,y:365};
 const boss={x:400,y:105};
@@ -151,14 +141,11 @@ function updateUI(){
  $('#bossHp').style.width=(bhp/180*100)+'%';
  $('#coins').textContent=coins;$('#turn').textContent=turn;
 }
-// LIGHTER EFFECTS (no adaptive-resolution mechanism anywhere): bursts simply spawn FEWER
-// particles — they're drawn as one batched line-path per colour bucket, so big bursts cost
-// more draw segments for no extra visual quality. Hard cap keeps the array tiny even if a
-// "advanced" event spams bursts; oldest particles are recycled instead of piling up.
+// bursts stay tiny (n<=9, pool cap 130): batched line paths, zero allocs
 function burst(px,py,n,col){
- n=Math.min(n,9); // fewer sparks, same pop — they read as motion streaks either way
+ n=Math.min(n,9);
  for(let i=0;i<n;i++){
-  if(particles.length>=130)continue; // hard cap: bursts during 'advanced' events can never pile up
+  if(particles.length>=130)continue;
   const a=rand(0,6.283),v=rand(1,5),p=pFree.pop()||{};
   p.x=px;p.y=py;p.vx=Math.cos(a)*v;p.vy=Math.sin(a)*v;
   p.life=rand(20,45);p.color=col;p.size=rand(2,7);
@@ -166,7 +153,7 @@ function burst(px,py,n,col){
  }
 }
 function end(win,spared=false){
- state='over';if(bgm)bgm.pause();music=null;fx=0; // kill any in-flight crazy zoom so it can't fire mid-overlay
+ state='over';if(bgm)bgm.pause();music=null;fx=0; // no zoom may fire under the overlay
  $('#overlay').style.display='flex';
  $('#overlay').innerHTML=`<div class="panel"><h1>${win?'🎉 NEIGHBOURHOOD SAVED!':'💀 OH NOOO!'}</h1>
  <p>${spared?'Sir Scoopington has joined the neighbourhood watch!':win?'THE ICE CREAM IS SAFE!':'YOU HAVE BEEN FLATTENED BY DESSERT.'}</p>
@@ -258,13 +245,12 @@ document.addEventListener('keydown',e=>{
 });
 document.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
 
-// ================= PERFORMANCE REWRITE =================
-// Before: every frame re-stroked ~100 shadowBlur glows (the single most expensive
-// 2D-canvas op there is) plus fresh gradients and hundreds of fills. Result: ~30fps.
-// Now: the static neighbourhood (sky, stars, houses, grass, rainbow) is rendered ONCE
-// into an offscreen canvas, and every moving thing (characters / props / speech bubbles)
-// is baked into small sprite canvases once as well. A frame is now just ~20 drawImage()
-// calls. Expect a solid 60fps.
+// ================= RENDER ARCHITECTURE =================
+// Static backdrop + all movers baked ONCE into sprite canvases (mkSpr/DPR/TXR/BGR
+// supersampling). A frame is ~20 drawImage() calls — never reintroduce per-frame
+// shadowBlur/gradients/text rasterisation in draw() (that was the 30fps cause).
+// The #gl WebGL layer composites OVER the visible #c scene canvas and only ever
+// paints around the characters (see buildFX) — the scene itself is never replaced.
 const DPR=Math.min(3,Math.max(2,window.devicePixelRatio||1));
 const SPR={},SHADOWED={};
 // mkSpr('id', drawFn, shadowed)  OR  mkSpr('id', width, height, drawFn, shadowed)
@@ -274,17 +260,14 @@ function mkSpr(id,w,h,drawFn,shadowed){
  const s=cv.getContext('2d');s.setTransform(DPR,0,0,DPR,0,0);s.textAlign='center';if(drawFn)drawFn(s);
  SPR[id]=Object.assign(cv,{w:w,h:h});if(shadowed)SHADOWED[id]=1}
 function bl(s,cx,cy,r,a){s.globalAlpha=a;s.beginPath();s.arc(cx,cy,r,0,6.2832);s.fill()}
-// ---- characters are 100% OPAQUE: no translucent glow ghosts any more. Just a solid
-// drop shadow so they pop off the backdrop. (The only translucency left in the whole
-// scene is inside the WebGL motion-blur pass, where it's physically correct anyway.)
+// characters: opaque sprites with a baked drop shadow (no translucent ghosts in-scene)
 function emojiSprite(e,size,name,scale){const w=Math.round(size*scale)+26,h=Math.round(size*scale)+48;
  return c=>{const fs=size*scale;c.font=fs+'px serif';c.textBaseline='middle';
   c.globalAlpha=.55;c.fillStyle='#000';c.fillText(e,w/2+3,h/2-2);c.globalAlpha=1;
   c.fillStyle='#fff';c.fillText(e,w/2,h/2-6);
   if(name){c.font='8px "Press Start 2P",monospace';c.globalAlpha=.7;c.fillStyle='#000';c.fillText(name,w/2+1,h-9);c.globalAlpha=1;c.fillStyle='#fff';c.fillText(name,w/2,h-10)}};
  emojiSprite.w=w;emojiSprite.h=h;return emojiSprite}
-// BG is baked ONCE at 2x (1600x920) and drawn downscaled every frame — cheap
-// bilinear downscale gives a crisp, retina-quality backdrop from an 800x460 canvas.
+// BG baked once at 2x, drawn downscaled each frame (crisp + cheap)
 const BGR=2;
 mkSpr('bg',W*BGR,H*BGR,s=>{
  s.scale(BGR,BGR);
@@ -314,8 +297,7 @@ mkSpr('hero',emojiSprite('💖',48,'YOU',.85),1);
 mkSpr('sheep',emojiSprite('🐑',48,'SHEEP',.9),1);
 ['👵','🦝','🐦','🐈','📫','🍦'].forEach((e,i)=>mkSpr('npc'+i,emojiSprite(e,48,npcs[i][1],.7),1));
 mkSpr('bub',190,36,s=>{s.fillStyle='#fff';s.fillRect(0,0,190,26);s.beginPath();s.moveTo(178,26);s.lineTo(190,26);s.lineTo(182,36);s.closePath();s.fill();s.fillStyle='#000';s.font='9px "Press Start 2P",monospace';s.textBaseline='middle';s.fillText('beep beep ima sheep',95,13)});
-// ---- PROPS: baked at 3x so they downscale to buttery-smooth ~11px sprites on the
-// 800x460 scene canvas (and stay crisp when a hit-zoom magnifies the frame).
+// props baked at 3x → smooth ~11px sprites
 const PR=3;
 const prop=(id,e,size)=>mkSpr(id,34*PR,34*PR,s=>{s.scale(PR,PR);s.font=size+'px serif';s.textAlign='center';s.textBaseline='middle';s.fillText(e,17,19)});
 prop('prop0','🛴',26);prop('prop1','🎰',26);prop('prop2','📦',26);prop('prop3','🧶',26);prop('prop4','🪧',26);
@@ -327,23 +309,45 @@ mkSpr('b4',26,s=>{s.fillStyle='#e5b16d';bl(s,13,13,11,1);s.strokeStyle='#8a5a1e'
 mkSpr('b5',26,s=>{s.fillStyle='#ff4545';bl(s,13,13,11,1);s.strokeStyle='#8f1414';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#6f0f0f';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
 const BSPR=['b1','b2','b3','b4','b5'];
 const bspr=b=>b.s||'b1';
-// ---- PERF: every sprite is baked at a supersampled size, so drawing it downscaled
-// onto the 800x460 scene canvas is both crisp AND fast (no per-frame text rendering).
+// text banners baked once (TXR supersample) — no per-frame font rasterisation
 const TXR=3;
 const txtSpr=(id,str,col)=>mkSpr(id,420*TXR,30*TXR,s=>{s.scale(TXR,TXR);s.fillStyle=col;s.font='12px "Press Start 2P",monospace';s.textBaseline='middle';s.fillText(str,210,15)});
 txtSpr('txt0','DODGE THE DESSERT!','#fff');
 txtSpr('txt1','CHOOSE YOUR ACTION BELOW!','#fff');
 txtSpr('txt2','HIT THE GREEN! (SPACE / TAP)','#ffe98a');
-// ---- characters are 100% opaque now. What you see around them is a real motion blur:
-// each object carries a velocity, and the WebGL pass below smears it along that exact
-// direction of travel with many dense sub-samples (velocity-shutter style), so it reads
-// as camera/retina blur instead of an evenly-spaced ghost trail.
-function spr(id,cx,cy){const S2=SPR[id];x.drawImage(S2,cx-S2.w/2,cy-S2.h/2,S2.w,S2.h)}
-// ---- neighbours with lives of their own: they interact with the buildings ----
-// Each neighbour picks a "bit" (scooter run, slot machine at a house, dragging a parcel
-// to a door, knitting on a porch, stealing an estate sign, dropping crumbs, blessing
-// people with love, polishing the rainbow, napping in the gutter...) and plays it out.
+// ---- MASK system: the WebGL layer must ONLY affect characters, never the backdrop.
+// Each character sprite gets a sibling alpha mask (solid rounded blob, same geometry)
+// baked once via mkMask(); draw() records every character's position into CHARQ[];
+// composeMsk() stamps those masks into the shared MC canvas each frame.
+// ---- NPCs run ACTS "bits" (scooter, slots, parcel…); o.vx/o.vy feed the motion-blur pass
 const HOUS=(()=>{const a=[];for(let i=0;i<8;i++)a.push({x:i*110,y:290-(i%3)*25});return a})();
+const NIDS=['npc0','npc1','npc2','npc3','npc4','npc5'];
+const MSK={};
+function mkMask(id){const S2=SPR[id],w=S2.w,h=S2.h,cv=document.createElement('canvas');
+ cv.width=Math.ceil(w*DPR);cv.height=Math.ceil(h*DPR);
+ const m=cv.getContext('2d');m.setTransform(DPR,0,0,DPR,0,0);m.fillStyle='#fff';
+ // rounded rect via arcTo corners (arcTo/roundRect aren't in the test mock 2D ctx)
+ const bw=w*.78,bh=h*.62,bx=(w-bw)/2,by=h*.06,r=Math.min(bw,bh)/2;
+ try{
+  m.beginPath();m.moveTo(bx+r,by);m.arcTo(bx+bw,by,bx+bw,by+bh,r);m.arcTo(bx+bw,by+bh,bx,by+bh,r);
+  m.arcTo(bx,by+bh,bx,by,r);m.arcTo(bx,by,bx+bw,by,r);m.fill();
+ }catch(e){m.fillRect(bx,by,bw,bh)}
+ MSK[id]=Object.assign(cv,{w:w,h:h})}
+['boss','hero','sheep','bub'].concat(NIDS).forEach(mkMask);
+BSPR.forEach(id=>mkMask(id));
+// CHARQ: flat [id,cx,cy,w,h] records collected by spr() during draw(); reused array
+const CHARQ=[];
+function spr(id,cx,cy){const S2=SPR[id];x.drawImage(S2,cx-S2.w/2,cy-S2.h/2,S2.w,S2.h);CHARQ.push(id,cx,cy,S2.w,S2.h)}
+// MC: character-only mask canvas uploaded to GL unit 3 each frame (see buildFX)
+const MC=document.createElement('canvas');MC.width=W;MC.height=H;
+const mx2=MC.getContext('2d');
+function composeMsk(){
+ mx2.clearRect(0,0,W,H);
+ for(let i=0;i<CHARQ.length;i+=5){
+  const M=MSK[CHARQ[i]];
+  if(M)mx2.drawImage(M,CHARQ[i+1]-M.w/2,CHARQ[i+2]-M.h/2,M.w,M.h);
+ }
+}
 const ACTS=[
  {id:'scoot',who:[0],label:'🛴 Grandma rocket-scooters down the street',dur:6500,run(o,a,e){const p=Math.min(1,e.t/a.dur),sx=70+680*p,sy=414-Math.abs(Math.sin(p*Math.PI))*14,d=p<.5?1:-1;o.vx=d*7.2;o.vy=-Math.cos(p*Math.PI)*1.2;spr('prop0',sx+d*10,sy-4);return{x:sx,y:sy}}},
  {id:'slots',who:[1],label:'🦝 Greg runs the corner slot machine',dur:7000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,on=Math.floor(e.t/160)%2;spr('prop1',h.x+44,h.y+152);o.vx=on?-2.6:2.6;o.vy=0;return{x:h.x+(on?-32:30),y:h.y+142}}},
@@ -357,7 +361,6 @@ const ACTS=[
  {id:'nap',who:[1],label:'💤 Greg naps face-down in the gutter',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h;spr('z',h.x+50,h.y+146-Math.sin(e.t*.004)*5);o.vx=0;o.vy=0;return{x:h.x+26,y:h.y+164}}},
  {id:'window',who:[4],label:'📫 Dave posts a letter through a letterbox',dur:6000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur);if(p<.5)spr('note',h.x+44,h.y+96+p*60);o.vx=p<.5?1.6:.4;return{x:h.x+30,y:h.y+168}}},
  {id:'yarn',who:[3],label:'🧶 Luna steals Grandma\'s yarn',dur:7000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur),yx=h.x+70-p*180;spr('prop3',yx,h.y+170);o.vx=-3.2;return{x:yx+16,y:h.y+166}}},
- // NEW bits — more ways for the neighbours to mess with the buildings:
  {id:'paint',who:[1],label:'🎨 Greg "renovates" a house wall with spray paint',dur:8000,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,p=Math.min(1,e.t/a.dur);spr('note',h.x+16+p*54,h.y+60+Math.sin(e.t*.02)*7);o.vx=Math.cos(e.t*.015)*2.4;o.vy=Math.sin(e.t*.019)*1.6;return{x:h.x+44,y:h.y+150}}},
  {id:'flash',who:[5],label:'📸 Scoop Jr. flashes a photo of every window',dur:6500,setup(){this.h=pick(HOUS)},run(o,a,e){const h=this.h,i=Math.floor(e.t/500);if(i%2===0&&e.t<5000)spr('star',h.x+44,h.y+60+(i%4)*36);o.vx=.6;return{x:h.x+44,y:h.y+158}}},
  {id:'chase',who:[2,3],label:'🐈 Luna chases Kevin across the whole street',dur:6000,setup(){this.off=rand(34,64)},run(o,a,e){const p=Math.min(1,e.t/a.dur),cx=52+700*p;o.vx=11.6;o.vy=0;if(o.id==='npc2')spr('puff',cx-this.off,cy_(e));return{x:cx,y:cy_(e)}}},
@@ -370,7 +373,6 @@ const ACTS=[
 ];
 function cy_(e){return 396-Math.abs(Math.sin(e.t*.012))*16}
 function mkNpc(id,x,y){return{id:id,sid:id.replace('npc',''),x:x,y:y,tx:x,ty:y,vx:0,vy:0,act:null,end:0,start:0,rest:0,home:{x:x,y:y}}}
-const NIDS=['npc0','npc1','npc2','npc3','npc4','npc5'];
 const NPCS=NIDS.map((id,i)=>mkNpc(id,i===4?60:(i===5?700:95+i*160),i===4?404:(i===5?300:214)));
 function assign(n,now){
  const pool=ACTS.filter(a=>(!a.who||a.who.indexOf(+n.sid)>=0)&&a.id!==n.cur);
@@ -390,12 +392,12 @@ function updNpc(n,now,dt){
 }
 function draw(){
  x.drawImage(SPR['bg'],0,0,W,H);
- // 100% opaque characters, zero ghosting drawn here: the WebGL pass does the real blur
+ CHARQ.length=0;
  for(const n of NPCS){updNpc(n,t,16.7);spr(n.id,n.x,n.y)}
  spr('boss',boss.x,boss.y+Math.sin(t*.004)*5);
  spr('hero',hero.x,hero.y);
  for(const b of bullets)spr(bspr(b),b.x,b.y);
- // PERF: one batched path per colour bucket instead of a stroke()/beginPath() per particle
+ // one batched path per colour bucket (no per-particle beginPath/stroke)
  if(particles.length){
   x.lineCap='round';
   const buckets={};
@@ -409,16 +411,15 @@ function draw(){
  const hop=sheepSay>0?Math.abs(Math.sin(t*.012))*14:0,sy2=428-hop;
  spr('sheep',752,sy2);
  if(sheepSay>0){spr('bub',650,368);sheepSay-=16}
- // ---- publish where the fast stuff is, so the GPU only blurs THAT (zoomed in) ----
- // BR = position of the blur focus (uv), BRVX/BRVY = its velocity in px per 60fps-frame.
- let mx=0,my=0;for(const b of bullets){const s=Math.hypot(b.vx,b.vy);if(s>my){my=s;mx=1}}
- if(mx){let bi=0,bs=0;for(let i=0;i<bullets.length;i++){const s=Math.hypot(bullets[i].vx,bullets[i].vy);if(s>bs){bs=s;bi=i}}
+ // BR = blur focus uv + velocity of the fastest mover (feeds the shutter direction)
+ let mxB=0,myB=0;for(const b of bullets){const s=Math.hypot(b.vx,b.vy);if(s>myB){myB=s;mxB=1}}
+ if(mxB){let bi=0,bs=0;for(let i=0;i<bullets.length;i++){const s=Math.hypot(bullets[i].vx,bullets[i].vy);if(s>bs){bs=s;bi=i}}
   const b=bullets[bi];BR.x=b.x/800;BR.y=1-b.y/460;BRVX=b.vx;BRVY=b.vy}
  else{let ex=null,es=0;for(const n of NPCS){const s=Math.hypot(n.vx,n.vy);if(s>es){es=s;ex=n}}
   if(ex&&es>.8){BR.x=ex.x/800;BR.y=1-ex.y/460;BRVX=ex.vx;BRVY=ex.vy}else{BRVX=0;BRVY=0}}
- // baked text sprite — no per-frame font rasterisation (that was costing ~1ms/frame)
  spr(state==='dodge'?'txt0':state==='attack'?'txt2':'txt1',400,415);
  if(state==='attack')drawAtk();
+ composeMsk();
 }
 function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='battle';log('💨 MISS! Too slow!');setTimeout(()=>{if(state==='battle')enemyTurn()},600)}}
  t+=dt;
@@ -444,7 +445,7 @@ function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='b
    if(turn%2===0){const n=pick(news);zoomFx(1);mercy=Math.min(90,mercy+10);log('📺 BREAKING (mid-fight!): '+n+' 🏳️‍🌈 Pride Power: Mercy +10!');['#e40303','#ff8c00','#ffed00','#008026','#004dff','#750787'].forEach(k=>burst(boss.x,boss.y,8,k));sheepBeep()}
   }
  }
- // in-place swap-remove cull: no filter(), no new array, no garbage every frame
+ // in-place swap-remove cull: no filter(), no garbage
  for(let i=particles.length-1;i>=0;i--){const p=particles[i];
   p.x+=p.vx;p.y+=p.vy;p.vx*=.98;p.vy*=.98;p.life-=dt/16;
   if(p.life<=0){pFree.push(p);const l=particles.pop();if(i<particles.length)particles[i]=l}}
@@ -459,8 +460,8 @@ function loop(now){
 let atk=null,bgm=null,sheepAud=null,sheepTO,fx=0,fxS=0;const BR={x:.5,y:.5,s:0};let BRVX=0,BRVY=0;function zoomFx(s){fx=1;fxS=s}
 function drawAtk(){const L=150,Tp=335,Wd=500,Hh=56;x.save();x.fillStyle='#000';x.fillRect(L,Tp,Wd,Hh);const g=x.createLinearGradient(L,0,L+Wd,0);g.addColorStop(0,'#ff3b3b');g.addColorStop(.35,'#ffd23b');g.addColorStop(.5,'#3bff7a');g.addColorStop(.65,'#ffd23b');g.addColorStop(1,'#ff3b3b');x.globalAlpha=.9;x.fillStyle=g;x.fillRect(L+4,Tp+4,Wd-8,Hh-8);x.globalAlpha=1;x.strokeStyle='#fff';x.lineWidth=4;x.strokeRect(L,Tp,Wd,Hh);x.fillStyle='#000';x.fillRect(atk.p-5,Tp-8,10,Hh+16);x.fillStyle=Math.floor(t/90)%2?'#fff':'#ff0';x.fillRect(atk.p-3,Tp-6,6,Hh+12);x.restore()}
 function strike(){if(state!=='attack'||!atk||atk.d)return;atk.d=1;const o=Math.abs(atk.p-400),d=Math.max(6,Math.round(50*(1-o/250)));state='battle';hurtBoss(d);log(o<25?'🌟 PERFECT! '+d+' damage!':'💥 Hit for '+d+'!')}
-addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();strike()}});$('#gl').addEventListener('pointerdown',strike);
-const BGM_SRC=['https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','bgm.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='],SHEEP_SRC=['https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','sheep.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='];/* REMIX is first now — the sheep honks the remix version */
+addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();strike()}});$('#game').addEventListener('pointerdown',strike);
+const BGM_SRC=['https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','bgm.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='],SHEEP_SRC=['https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','sheep.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='];/* REMIX first — the sheep honks the remix */
 const DB=new Promise(r=>{try{const q=indexedDB.open('rumble',1);q.onupgradeneeded=()=>q.result.createObjectStore('f');q.onsuccess=()=>r(q.result);q.onerror=()=>r(null)}catch(e){r(null)}});
 const dbPut=(k,v)=>DB.then(d=>{try{d&&d.transaction('f','readwrite').objectStore('f').put(v,k)}catch(e){}});
 const dbGet=k=>DB.then(d=>d?new Promise(r=>{try{const q=d.transaction('f').objectStore('f').get(k);q.onsuccess=()=>r(q.result);q.onerror=()=>r()}catch(e){r()}}):0);
@@ -476,178 +477,135 @@ ld('#fb',setB);
 ld('#fs',(a,n)=>{setS(a,n);sheepBeep()});
 const news=['LGBT History Month runs all October','Oct 11 is National Coming Out Day','Oct 15 is Spirit Day, a day of action against anti-LGBTQ+ bullying','Nova Scotia’s first 2SLGBTQIA+ Action Plan and community grants roll out','Canada’s Drag Race: All Stars debuts its inaugural season','Canadian unions celebrate 2SLGBTQI+ workers in Pride solidarity campaigns','Pride flag raised on Parliament Hill; federal safety funding announced','Pride season events spanned Toronto, Hamilton, Windsor and beyond after the FIFA World Cup 2026 summer'];
 $('#tk').textContent='📺 NEWS SNAPSHOT (Oct 20, 2026, not live): '+news.join('  🏳️‍🌈  ')+'  🏳️‍🌈  ';
-let sheepSay=0,sy=null;
+let sheepSay=0,sheepIV=null;
 function sheepBeep(){
  sheepSay=2200;zoomFx(0);if(mute)return;audioStart();if(sheepAud){sheepAud.currentTime=0;sheepAud.play().catch(()=>{});clearTimeout(sheepTO);sheepTO=setTimeout(()=>sheepAud.pause(),2300);return}
- 
  try{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance('beep beep, I’m a sheep');u.pitch=2;u.rate=1.4;speechSynthesis.speak(u)}catch(e){}
 }
 $('#sheepBtn').onclick=sheepBeep;
-setInterval(()=>{if(state==='dodge'||state==='battle')sheepBeep()},24000);
-// ===== WebGL post-FX: 3D tilted glass card, shadow, bloom, frosted blur, velocity shutter =====
-// This pipeline IS the renderer — there is deliberately NO 2D fallback path. Reliability comes
-// from making the main feature correct by construction instead of papering over it:
-//  - zoom/rotation are analytic curves over a decay counter that is hard-clamped to [0,1]
-//    -> zmv always lands in [1, 1.6], rtv always in [0, PI]. The vertex shader divides the
-//    fullscreen quad by zm, so zm >= 1 guarantees a non-degenerate transform every frame.
-//  - pointer tilt is clamped to +-0.5 and smoothed; all uniforms pass through fin() which
-//    replaces NaN/Infinity with 0 before submission (NaN uniforms were the classic way a
-//    shader "worked on my machine" and black-screened on another).
-//  - each ping-pong framebuffer is validated COMPLETE once at startup; an incomplete FBO
-//    (rare driver quirk) disables ONLY the temporal-smear passes, never the whole game.
-//  - context loss PAUSES rendering and auto-rebuilds shaders/textures/FBOs on restore —
-//    recovery in place, not a retreat to a second code path.
+sheepIV=setInterval(()=>{if(state==='dodge'||state==='battle')sheepBeep()},24000);
+// ===== WebGL character-FX layer (OVER the visible scene canvas — never replaces it) =====
+// No 2D fallback by design: correct-by-construction math + startup capability checks +
+// pause-and-rebuild on context loss. Hard rules:
+//  - one texture sample per fragment, constant loop bounds (dynamic-loop-sample programs
+//    link fine but INVALID_OPERATION at draw on strict drivers — split into static programs)
+//  - every uniform passes fin(); fx clamped [0,1] => zmv∈[1,1.6], rtv∈[0,π] (vertex shader
+//    divides the quad by zm, so zm>=1 is load-bearing)
+//  - pointer tilt clamped ±0.5; FBO-incomplete disables only the smear passes
+//  - webglcontextlost -> preventDefault + pause; restored -> buildFX() (GL handles never
+//    cached across loss; persistent input/effect state lives OUTSIDE buildFX)
+// Scene transport: texImage2D(canvas) uploads from #c EVERY frame — #c is now VISIBLE
+// (the frozen-backbuffer/copyTexSubImage approach could never show new frames).
+// Passes (all additive/soft-light onto transparent pixels, alpha-weighted by the MC mask
+// so the backdrop stays untouched): PM temporal shutter, PB dark bloom, PD glow, PG frost.
 let glF=()=>{};
 const glOpts={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'};
-// RELIABILITY FIX: request a DESKTOP-quality context (preserveDrawingBuffer:true) for the FX canvas.
-// With preserve=false (the default), browsers may discard the backbuffer after every composite,
-// which on some GPUs/driver stacks causes flicker/black frames and is a known trigger for context
-// loss under load. preserve=true costs ~one extra blit per frame but makes presentation rock-solid.
-const glPreserve={alpha:true,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,preserveDrawingBuffer:true,powerPreference:'high-performance'};
-let gl=$('#gl').getContext('webgl',glPreserve)||$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('experimental-webgl',glPreserve);
-if(!gl){$('#log').textContent='⚠️ WebGL unavailable — enable hardware acceleration in your browser settings.'}else{
-// CRASH FIX (the real one): this used to be ONE program with a `m` mode switch. WebGL1
-// requires every texture-sample loop bound to a CONSTANT — compilers that ignored that rule
-// produced programs that LINK fine but fail at draw time ("invalid operation", the classic
-// "advanced" bug). Each pass is its own tiny program with EXACTLY one texture sample per
-// fragment: zero loops, zero dynamic sampling. On top of that, EVERY value submitted to the
-// GPU is derived from hard-clamped state (see glF below) and passed through fin(), so
-// NaN/Infinity can never reach a uniform. The whole pipeline lives inside buildFX() so a
-// lost GL context can be rebuilt from scratch on 'webglcontextrestored' — recovery, not retreat.
+let gl=$('#gl').getContext('webgl',glOpts)||$('#gl').getContext('experimental-webgl',glOpts);
+if(!gl){$('#log').textContent='⚠️ WebGL unavailable — enable hardware acceleration (the game still renders on the 2D scene canvas).'}else{
 const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);
  if(!gl.getShaderParameter(h,gl.COMPILE_STATUS)){console.error('shader compile failed:',gl.getShaderInfoLog(h));return null}return h};
-// shared vertex: tilt/zoom/rotate applied ONCE per vertex (was duplicated in two fragment shaders)
+// shared vertex: rotation/zoom about center, then perspective tilt. z is kept in [.8,.95]:
+// the quad shrinks toward the horizon (never crosses it) and stays inside the viewport so
+// full-frame effects can't spill past the #c scene underneath.
 const vs=`precision mediump float;attribute vec2 p;uniform vec2 r;uniform float k,o,zm,rt;varying vec2 v;
 void main(){vec2 q=p;float z=cos(rt),s2=sin(rt);q=vec2(z*q.x-s2*q.y,s2*q.x+z*q.y);q/=zm;
 v=q*.5+.5;vec3 w=vec3(q*vec2(1.,.575)*k,0.);w.y-=o;
 float a=cos(r.x),b=sin(r.x),cc=cos(r.y),d=sin(r.y);
 w=vec3(w.x*cc+w.z*d,w.y,-w.x*d+w.z*cc);w=vec3(w.x,w.y*a-w.z*b,w.y*b+w.z*a);
-gl_Position=vec4(w.xy/vec2(1.,.575),0.,1.+w.z*.7);}`;
-// motion pass: current frame blended with the previous accumulated frame along the velocity
-// vector -> continuous shutter smear (temporal integration), ONE fetch per texture.
-const PMs=`precision mediump float;uniform sampler2D s,pv;uniform vec2 vd;uniform float sp;varying vec2 v;
+gl_Position=vec4(w.xy/vec2(1.,.575),0.,.8+w.z*.15);}`;
+// PM: current frame blended with previous accumulated frame along velocity = shutter smear.
+// Output alpha = scene alpha x mask -> trails only exist where a character currently is.
+const PMs=`precision mediump float;uniform sampler2D s,pv,ms;uniform vec2 vd;uniform float sp;varying vec2 v;
 void main(){vec4 n=texture2D(s,v);vec4 o=texture2D(pv,v-vd*sp);
-gl_FragColor=mix(n,o,clamp(sp,0.,.92)*(n.a>.03&&o.a>.03?.62:.3));}`;
-// shadow caster: fixed 5-tap cross (constant taps, not a loop)
-const PBs=`precision mediump float;uniform sampler2D pv;varying vec2 v;
-void main(){vec3 c=texture2D(pv,v).rgb*.36;
-c+=(texture2D(pv,v+vec2(.05,.03)).rgb+texture2D(pv,v-vec2(.05,.03)).rgb
+gl_FragColor=mix(n,o,clamp(sp,0.,.92)*(n.a>.03&&o.a>.03?.62:.3))*texture2D(ms,v).a;}`;
+// PB: soft-light dark bloom over the masked accumulation (5-tap cross, constant taps)
+const PBs=`precision mediump float;uniform sampler2D pv,ms;varying vec2 v;
+void main(){vec4 b=texture2D(pv,v);vec3 n=b.rgb;
+vec3 c=n*.36+(texture2D(pv,v+vec2(.05,.03)).rgb+texture2D(pv,v-vec2(.05,.03)).rgb
 +texture2D(pv,v+vec2(.03,-.05)).rgb+texture2D(pv,v-vec2(.03,.05)).rgb)*.16;
-gl_FragColor=vec4(c*.6,1.);}`;
-// drop shadow quad: SDF rounded box, no textures at all
-const PDs=`precision mediump float;varying vec2 v;
-void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
-float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
-gl_FragColor=vec4(0.,0.,0.,.75*(1.-smoothstep(-30.,60.,dd)));}`;
-// glass card: direct copy + 2-tap cheap frost + neon edge
-const PGs=`precision mediump float;uniform sampler2D pv;varying vec2 v;
-void main(){vec2 e=abs(v-.5)*vec2(800.,460.)-vec2(400.,230.)+vec2(30.);
-float dd=length(max(e,0.))+min(max(e.x,e.y),0.)-30.;
-vec3 c=texture2D(pv,v).rgb+(texture2D(pv,v+vec2(.008,.006)).rgb+texture2D(pv,v-vec2(.008,.006)).rgb)*.04;
-c+=smoothstep(-8.,0.,dd)*.4*vec3(1.,.9,1.);
-gl_FragColor=vec4(c,1.-smoothstep(-1.,1.,dd));}`;
-// ---- persistent state that SURVIVES a context loss/rebuild (input + effect math) ----
-let mx=0,my=0,sx=0,sy2=0,hpx=400,hpy=365,ph=0,VX=.7,VY=-.714,shutter=0;
+gl_FragColor=vec4(n*(1.-2.*n*c),b.a)*texture2D(ms,v).a;}`;
+// PD: warm radial glow around masked pixels (fixed 5 taps, no loops)
+const PDs=`precision mediump float;uniform sampler2D s,ms;varying vec2 v;
+void main(){float a=texture2D(ms,v).a;
+float g=(texture2D(ms,v+vec2(.03,.02)).a+texture2D(ms,v-vec2(.03,.02)).a
++texture2D(ms,v+vec2(.02,-.03)).a+texture2D(ms,v-vec2(.02,.03)).a)*.25;
+vec3 c=texture2D(s,v).rgb*(1.+g*1.2*vec3(1.,.85,1.));
+gl_FragColor=vec4(c,min(1.,a+g*.5)*.5);}`;
+// PG: cheap 2-tap frost on masked pixels only
+const PGs=`precision mediump float;uniform sampler2D s,ms;varying vec2 v;
+void main(){float a=texture2D(ms,v).a;
+vec3 c=texture2D(s,v).rgb+(texture2D(s,v+vec2(.008,.006)).rgb+texture2D(s,v-vec2(.008,.006)).rgb)*.04;
+gl_FragColor=vec4(c,a*.45);}`;
+// persistent across rebuilds: input + effect math
+let mx=0,my=0,sxS=0,sySy=0,hpx=400,hpy=365,ph=0,VX=.7,VY=-.714,shutter=0;
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5},{passive:true});
 const clamp=(v,a,b)=>v<a?a:v>b?b:v;
-// fin(): last line of defence — a non-finite uniform poisons the whole draw on some drivers.
-const fin=v=>Number.isFinite(v)?v:0;
+const fin=v=>Number.isFinite(v)?v:0; // NaN/Infinity uniforms black-screen drivers
 function buildFX(){
  const mkP=(src)=>{const p=gl.createProgram();
   const v=sh(gl.VERTEX_SHADER,vs),f=sh(gl.FRAGMENT_SHADER,src);if(!v||!f)return null;
   gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p);
   if(!gl.getProgramParameter(p,gl.LINK_STATUS)){console.error('shader link failed:',gl.getProgramInfoLog(p));return null}
-  const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
+  const U2=n=>gl.getUniformLocation(p,n);return{p,u:{s:U2('s'),pv:U2('pv'),ms:U2('ms'),o:U2('o'),r:U2('r'),k:U2('k'),sp:U2('sp'),vd:U2('vd'),zm:U2('zm'),rt:U2('rt')}}};
  const PM=mkP(PMs),PB=mkP(PBs),PD=mkP(PDs),PG=mkP(PGs);
- // If a program genuinely fails to build we do NOT run a broken pipeline (that was the old
- // frozen-canvas bug). This is a startup capability check, not a per-frame fallback: either
- // the GPU builds these four trivially-simple programs or the post-FX stays off entirely.
+ // startup capability check (not a per-frame fallback): if these trivial programs won't
+ // build, post-FX stays off entirely — the plain scene canvas still renders the game.
  if(!PM||!PB||!PD||!PG){console.error('WebGL program build failed — FX disabled by capability check');glF=()=>{};return}
  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
  const pl=gl.getAttribLocation(PM.p,'p');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0);
  gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
  const tx=u=>{gl.activeTexture(gl.TEXTURE0+u);const T=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,T);
   [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(a=>gl.texParameteri(gl.TEXTURE_2D,a[0],a[1]));
-  if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
- // S = scene upload (unit 0). T0/T1 = ping-pong pair: one is always the CURRENT shutter-accumulated
- // frame, the other the feedback source. Reading prev while writing next = temporal blur, no loops.
- const S=tx(0),T=[tx(1),tx(2)];
- // Validate each ping-pong FBO once at startup. An incomplete FBO (rare driver quirk) would
- // make every drawArrays throw INVALID_FRAMEBUFFER_OPERATION forever — instead we skip only
- // the passes that need it; the base composite still renders, correctly, in the SAME pipeline.
+  if(u)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,W,H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return T};
+ const S=tx(0),T=[tx(1),tx(2)],M=tx(3); // S scene, T ping-pong shutter pair, M char mask
  const F=T.map(tt=>{const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tt,0);
   const ok=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;if(!ok)console.warn('FBO incomplete — motion accumulation disabled');return{f,ok}});
  const fboOK=F.every(o=>o.ok);
  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
- // draw one pass with its own tiny program. Every uniform goes through fin()/clamp() here —
- // nothing un vetted ever touches the driver.
  const dr=(prog,k,o,rx,ry,zm,rt,pvU,sp)=>{
   gl.useProgram(prog.p);
   if(prog.u.k)gl.uniform1f(prog.u.k,fin(k));
   if(prog.u.o)gl.uniform1f(prog.u.o,fin(o));
   if(prog.u.r)gl.uniform2f(prog.u.r,fin(rx),fin(ry));
-  if(prog.u.zm)gl.uniform1f(prog.u.zm,fin(zm));   // zm >= 1 guaranteed by caller: quad never degenerates
+  if(prog.u.zm)gl.uniform1f(prog.u.zm,fin(zm));
   if(prog.u.rt)gl.uniform1f(prog.u.rt,fin(rt));
   if(prog.u.sp!==null&&prog.u.sp!==undefined)gl.uniform1f(prog.u.sp,fin(sp));
   if(prog.u.vd!==null&&prog.u.vd!==undefined)gl.uniform2f(prog.u.vd,fin(VX),fin(VY));
-  if(prog.u.s!==null&&prog.u.s!==undefined)gl.uniform1i(prog.u.s,0);   // scene texture on unit 0
-  if(prog.u.pv!==null&&prog.u.pv!==undefined)gl.uniform1i(prog.u.pv,pvU); // ping-pong on unit 1 or 2
+  if(prog.u.s!==null&&prog.u.s!==undefined)gl.uniform1i(prog.u.s,0);
+  if(prog.u.pv!==null&&prog.u.pv!==undefined)gl.uniform1i(prog.u.pv,pvU);
+  if(prog.u.ms!==null&&prog.u.ms!==undefined)gl.uniform1i(prog.u.ms,3);
   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);};
  glF=()=>{
-  if(gl.isContextLost())return;                 // paused; webglcontextrestored rebuilds everything
-  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-  // RELIABILITY FIX: texImage2D(canvas) is a CPU readback + re-upload EVERY frame on most
-  // drivers — the single biggest source of driver-state churn (and the thing that made the
-  // crazy-zoom frames the most likely to hit a lost context). Instead: allocate S once as an
-  // 800x460 texture and keep it current with gl.copyTexSubImage2D, which copies from the
-  // CURRENTLY BOUND FRAMEBUFFER. So we bind the default framebuffer (the #gl canvas back
-  // buffer, which holds last frame's composited output at exactly the same transform when
-  // fx==0, and is refreshed anyway while fx decays), blit it into S, then proceed.
-  // No canvas readback, no per-frame reallocation, no extension needed.
-  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-  if(!S.__alloc){
-   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,800,460,0,gl.RGBA,gl.UNSIGNED_BYTE,null);S.__alloc=1;
-   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c); // seed frame 0 from the scene canvas
-  }else{
-   gl.copyTexSubImage2D(gl.TEXTURE_2D,0,0,0,800,460);
-  }
-  // hit-zoom ("crazy" radial punch): fx is hard-clamped to [0,1] before any math, so zmv is
-  // ALWAYS within [1, 1.6] and rtv within [0, PI] — analytically impossible to feed the shader
-  // a degenerate/negative/infinite transform, which is exactly what killed the old version.
+  if(gl.isContextLost())return;
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,S);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c); // upload fresh scene
+  gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D,M);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,MC); // upload fresh mask
+  // hit-zoom: analytic curves over decay counter hard-clamped [0,1]
   fx=clamp(fx-.06,0,1);const q=1-fx,pr=fx>0?Math.sin(q*Math.PI):0,zmv=1+pr*(fxS?.5:.2),rtv=fxS&&fx>0?3.1416*(1-Math.pow(1-q,3)):0;
-  // ---- shutter: direction = the fast object's ACTUAL velocity (aspect-corrected uv),
-  // length = speed x ~1.4 frames of travel. During a hit zoom the whole frame sweeps along
-  // the camera-motion vector too — that's what sells the punch.
+  // shutter vector = fastest mover's real velocity (aspect-corrected uv); camera sweep during punch
   const spd=Math.hypot(BRVX,BRVY);
-  if(spd>.05){VX=BRVX/800;VY=-BRVY/460}
+  if(spd>.05){VX=BRVX/W;VY=-BRVY/H}
   else if(fx>.15){VX=.7;VY=-.714}
-  const want=Math.min(1,(Math.min(.115,spd*1.4)*800)/80)+(fx>.15?.55:0);
+  const want=Math.min(1,(Math.min(.115,spd*1.4)*W)/W)+(fx>.15?.55:0);
   shutter+=(Math.min(1,want)-shutter)*.35;
   if(shutter<.02)shutter=0;
+  sxS+=((hero.x-hpx)*.065-sxS)*.12;sySy+=((hero.y-hpy)*.05-sySy)*.12;hpx=hero.x;hpy=hero.y;
+  const rx=clamp(-.08-sySy*.55+Math.sin(t*.0007)*.03,-.5,.5),ry=clamp(sxS,-.5,.5);
+  gl.viewport(0,0,W,H);
   if(fboOK){
-   // PASS 1 (motion accumulate): write to F[next], read scene(S,unit0)+feedback(prev,unit 1+ph)
-   gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph].f);gl.viewport(0,0,800,460);
+   // PASS 1: accumulate shutter into F[next], reading scene + feedback prev (masked output)
+   gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,F[1-ph].f);
    gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
    dr(PM,1,0,0,0,zmv,rtv,1+ph,shutter);ph=1-ph;
-   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,800,460);
-  }else{
-   // no render-to-texture available on this GPU: draw the tilted scene straight to screen —
-   // same 3D transform, same shader family, just without the temporal smear. No second renderer.
-   gl.disable(gl.BLEND);gl.viewport(0,0,800,460);
-   dr(PM,1,0,0,0,zmv,rtv,1,0);
-  }
-  sx+=((hero.x-hpx)*.065-sx)*.12;sy2+=((hero.y-hpy)*.05-sy2)*.12;hpx=hero.x;hpy=hero.y;
-  const rx=clamp(-.08-sy2*.55+Math.sin(t*.0007)*.03,-.5,.5),ry=clamp(sx,-.5,.5);
-  if(fboOK){
-   // PASS 2: blurred silhouette pass, then drop-shadow quad, then the glass card reads the
-   // accumulated frame (now in T[ph]).
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+   // PASS 2: bloom / glow / frost additive over the accumulated masked frame
    gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
-   dr(PB,1,0,0,0,zmv,rtv,1+ph);
    gl.enable(gl.BLEND);
-   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
+   dr(PB,1,0,rx,ry,1,0,1+ph);
    dr(PD,1,0,rx,ry,1,0,1+ph);
-   gl.activeTexture(gl.TEXTURE1+ph);gl.bindTexture(gl.TEXTURE_2D,T[ph]);
    dr(PG,.9,.06,rx,ry,1,0,1+ph);
   }else{
    gl.enable(gl.BLEND);
@@ -655,13 +613,12 @@ function buildFX(){
    dr(PG,.9,.06,rx,ry,1,0);
   }
  };
- // Context loss is a PAUSE + REBUILD, not a crash and not a fallback: the browser guarantees
- // every GL object becomes invalid, so on restore we recreate the whole pipeline and carry on.
- $('#gl').addEventListener('webglcontextlost',e=>{e.preventDefault();glF=()=>{}});
- $('#gl').addEventListener('webglcontextrestored',()=>{console.info('WebGL context restored — rebuilding FX');buildFX()});
+ const glEl=$('#gl');
+ glEl.addEventListener('webglcontextlost',e=>{e.preventDefault();glF=()=>{}});
+ glEl.addEventListener('webglcontextrestored',()=>{console.info('WebGL context restored — rebuilding FX');buildFX()});
 }
 buildFX();
-}//end GL-setup else (if(!gl){...}else{ ... })
+}//end if(!gl){...}else{...}
 updateUI();requestAnimationFrame(loop);
 })();
 </script>
