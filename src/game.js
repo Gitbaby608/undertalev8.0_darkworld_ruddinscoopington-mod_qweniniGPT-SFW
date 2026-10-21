@@ -3,7 +3,7 @@
 import { $, pick, rand } from './util.js';
 import { S } from './state.js';
 import { NPCS as NPC_DATA, NEWS, END_LINES } from './data.js';
-import { log, sfx, tone, audioStart, bgmPause, bgmMuted } from './audio.js';
+import { log, sfx, tone, audioStart, bgmPause, bgmMuted, sheepBeep } from './audio.js';
 import { zoomFx } from './fx.js';
 import { burst, updateParticles, recycleParticles } from './particles.js';
 
@@ -53,8 +53,8 @@ export function hurtHero(d) {
   if (!S.hp) end(false);
 }
 
-function bullet(px, py, vx, vy, col, r = 7) {
-  S.bullets.push({ x: px, y: py, vx, vy, col, r });
+function bullet(px, py, vx, vy, sprId, r = 7) {
+  S.bullets.push({ x: px, y: py, vx, vy, s: sprId, r });
 }
 
 // 4 bullet patterns: rain, ring, waffle gaps, aimed shots.
@@ -64,23 +64,23 @@ function attackPattern() {
   log('⚠️ DODGE THE DESSERT! Use WASD or the arrow keys!');
   if (pattern === 0) {
     for (let i = 0; i < 15; i++) setTimeout(() => {
-      if (S.mode === 'dodge') bullet(rand(30, 770), -10, rand(-.4, .4), rand(2, 4), pick(['#ff53c5', '#fff16b', '#6bf4ff']));
+      if (S.mode === 'dodge') bullet(rand(30, 770), -10, rand(-.4, .4), rand(2, 4), pick(['b1', 'b2', 'b3']));
     }, i * 90);
   } else if (pattern === 1) {
     for (let i = 0; i < 32; i++) {
       const a = i * Math.PI / 16;
-      bullet(boss.x, boss.y, Math.cos(a) * 2.2, Math.sin(a) * 2.2, i % 2 ? '#ff65d5' : '#6bf4ff', 6);
+      bullet(boss.x, boss.y, Math.cos(a) * 2.2, Math.sin(a) * 2.2, i % 2 ? 'b3' : 'b2', 6);
     }
   } else if (pattern === 2) {
     for (let i = 0; i < 12; i++) {
-      if (i % 5 !== Math.floor(hero.x / 67)) bullet(i * 68 + 25, 0, 0, 3.3, '#e5b16d', 10);
-      if (i % 5 !== Math.floor(hero.x / 67)) bullet(i * 68 + 25, 460, 0, -3.3, '#e5b16d', 10);
+      if (i % 5 !== Math.floor(hero.x / 67)) bullet(i * 68 + 25, 0, 0, 3.3, 'b4', 10);
+      if (i % 5 !== Math.floor(hero.x / 67)) bullet(i * 68 + 25, 460, 0, -3.3, 'b4', 10);
     }
   } else {
     for (let i = 0; i < 7; i++) setTimeout(() => {
       if (S.mode !== 'dodge') return;
       const a = Math.atan2(hero.y - boss.y, hero.x - boss.x);
-      bullet(boss.x, boss.y, Math.cos(a) * 2.5, Math.sin(a) * 2.5, '#ff4545');
+      bullet(boss.x, boss.y, Math.cos(a) * 2.5, Math.sin(a) * 2.5, 'b5');
     }, i * 160);
   }
 }
@@ -170,7 +170,7 @@ export function update(dt) {
         S.mercy = Math.min(90, S.mercy + 10);
         log('📺 BREAKING (mid-fight!): ' + n + ' 🏳️‍🌈 Pride Power: Mercy +10!');
         ['#e40303', '#ff8c00', '#ffed00', '#008026', '#004dff', '#750787'].forEach(k => burst(boss.x, boss.y, 8, k));
-        import('./audio.js').then(m => m.sheepBeep());
+        sheepBeep();
       }
     }
   }
@@ -178,9 +178,8 @@ export function update(dt) {
   if (S.inv > 0) S.inv -= dt / 16;
 }
 
-// Wire DOM controls (called once from main.js). sheepBeep is passed in to keep
-// this module free of an eager audio→game cycle.
-export function bindControls(sheepBeep) {
+// Wire DOM controls (called once from main.js).
+export function bindControls() {
   $('#start').onclick = () => { audioStart(); reset(); };
   document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => act(b.dataset.a));
   $('#sound').onclick = () => {

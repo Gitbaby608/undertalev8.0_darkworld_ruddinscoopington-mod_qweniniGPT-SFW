@@ -2,6 +2,7 @@
 // feed the GL motion-blur shutter direction. updNpc lerps toward the bit's target.
 import { pick, rand } from './util.js';
 import { log } from './audio.js';
+import { NPCS as NPC_DATA } from './data.js';
 
 // House anchor positions — must match the backdrop baked in sprites.js.
 const HOUS = (() => { const a = []; for (let i = 0; i < 8; i++) a.push({ x: i * 110, y: 290 - (i % 3) * 25 }); return a; })();
@@ -20,7 +21,7 @@ export const ACTS = [
   { id: 'knit', who: [0], label: '🧶 Grandma knits on the porch (aggressively)', dur: 11000, setup() { this.h = pick(HOUS); }, run(o, a, e) { const h = this.h, b = Math.sin(e.t * .012) * 3; spr('prop3', h.x + 62, h.y + 158 + b); o.vx = b * .4; return { x: h.x + 34, y: h.y + 160 }; } },
   { id: 'sign', who: [2], label: '🐦 Kevin hijacks an estate sign', dur: 8000, setup() { this.h = pick(HOUS); }, run(o, a, e) { const h = this.h; o.vx = Math.sin(e.t * .01) * 2; o.vy = 0; return { x: h.x + 44, y: h.y + 148 + Math.sin(e.t * .008) * 3 }; } },
   { id: 'crumb', who: [2], label: '🐦 Kevin drops crumbs everywhere', dur: 7000, setup() { this.x0 = rand(60, 740); this.y0 = rand(250, 400); this.x1 = rand(60, 740); this.y1 = rand(250, 400); }, run(o, a, e) { const p = Math.min(1, e.t / a.dur), cx = this.x0 + (this.x1 - this.x0) * p, cyy = this.y0 + (this.y1 - this.y0) * p - Math.sin(p * Math.PI) * 40; spr('crumb', cx, cyy + 18); o.vx = (this.x1 - this.x0) / a.dur * 16; o.vy = (this.y1 - this.y0) / a.dur * 16; return { x: cx, y: cyy }; } },
-  { id: 'love', who: [3], label: '🐈 Luna blesses a random neighbour with love', dur: 6000, setup() { this.n = NPCS[(Math.random() * NPCS.length) | 0]; }, run(o, a, e) { const n = this.n, p = Math.min(1, e.t / a.dur); spr('heart', n.x, n.y - 34 - p * 30); o.vx = .4; return { x: n.x + 30, y: n.y }; } },
+  { id: 'love', who: [3], label: '🐈 Luna blesses a random neighbour with love', dur: 6000, setup() { this.n = NPCS[(Math.random() * NPC_DATA.length) | 0]; }, run(o, a, e) { const n = this.n, p = Math.min(1, e.t / a.dur); spr('heart', n.x, n.y - 34 - p * 30); o.vx = .4; return { x: n.x + 30, y: n.y }; } },
   { id: 'polish', who: [5], label: '⭐ Scoop Jr. polishes the rainbow', dur: 7500, setup() { this.i = rand(.2, .6); }, run(o, a, e) { const ang = Math.PI + Math.PI * (e.t / a.dur) * this.i + .2, rx = 400 + Math.cos(ang) * 186, ry = 310 + Math.sin(ang) * 186; spr('star', rx, ry); o.vx = Math.cos(ang + 1.57) * 2.2; o.vy = Math.sin(ang + 1.57) * 2.2; return { x: rx, y: ry }; } },
   { id: 'bat', who: [3], label: '💨 Luna bats a dust cloud at the boss', dur: 5000, run(o, a, e) { const p = Math.min(1, e.t / a.dur); spr('puff', 120 + p * 250, 206 - Math.sin(p * Math.PI) * 26); o.vx = 1.2; return { x: 104, y: 214 }; } },
   { id: 'nap', who: [1], label: '💤 Greg naps face-down in the gutter', dur: 8000, setup() { this.h = pick(HOUS); }, run(o, a, e) { const h = this.h; spr('z', h.x + 50, h.y + 146 - Math.sin(e.t * .004) * 5); o.vx = 0; o.vy = 0; return { x: h.x + 26, y: h.y + 164 }; } },
