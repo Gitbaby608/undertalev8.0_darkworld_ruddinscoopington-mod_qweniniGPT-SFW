@@ -2,12 +2,14 @@
 //  1) one action per turn (busy lock — can't attack multiple times in a turn)
 //  2) enemy attacks are visible (frame-driven bullets + telegraph warnings spawn)
 //  3) seven unique named attack patterns, rotating without repeats
-const { bootGame, pump } = require('./mocks.cjs');
+// Boots EITHER engine: default = ES modules (src/main.js); GAME_CLASSIC=1 = the exact
+// src/boot-classic.js bundle that file:// users run. Both must pass identically.
+const { bootGame, pump, getState, getExport } = require('./mocks.cjs');
 
 (async () => {
   const win = await bootGame();
   const errors = [];
-  const S = (await import('../src/state.js')).S;
+  const S = await getState();
   let fails = 0;
   const check = (name, cond, extra = '') => {
     if (cond) console.log('PASS', name);
@@ -61,7 +63,7 @@ const { bootGame, pump } = require('./mocks.cjs');
 
   // ---- 2 & 3) drive enemy turns by calling the module directly (in a real browser
   // the buttons are disabled during the boss turn, so clicks can't drive turns here).
-  const { enemyTurn } = await import('../src/game.js');
+  const enemyTurn = await getExport('game.js', 'enemyTurn');
   const seenNames = new Set();
   let sawBullets = false, sawTele = false, maxBullets = 0, maxTele = 0;
   for (let turn = 0; turn < 16 && S.mode !== 'over'; turn++) {

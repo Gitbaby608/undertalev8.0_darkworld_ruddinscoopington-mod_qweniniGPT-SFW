@@ -34,8 +34,9 @@ function mkMask(id) {
   MSK[id] = Object.assign(cv, { w, h });
 }
 
-['boss', 'hero', 'sheep', 'bub', 'npc0', 'npc1', 'npc2', 'npc3', 'npc4', 'npc5'].forEach(mkMask);
+['boss', 'hero', 'sheep', 'npc0', 'npc1', 'npc2', 'npc3', 'npc4', 'npc5'].forEach(mkMask);
 BSPR.forEach(mkMask);
+// (banners/warnings are baked later by patterns.js and opt out of masking via mkSpr().hide())
 
 export function composeMsk() {
   mx2.clearRect(0, 0, W, H);

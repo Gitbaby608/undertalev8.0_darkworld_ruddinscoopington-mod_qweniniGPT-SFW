@@ -9,7 +9,8 @@ const HOUS = (() => { const a = []; for (let i = 0; i < 8; i++) a.push({ x: i * 
 const NIDS = ['npc0', 'npc1', 'npc2', 'npc3', 'npc4', 'npc5'];
 
 // spr is injected by draw.js to avoid a circular import.
-let spr = () => {};
+// exported so the classic-script bundle (boot-classic) can rebind it directly
+export let spr = () => {};
 export function bindSpr(fn) { spr = fn; }
 
 function cy_(e) { return 396 - Math.abs(Math.sin(e.t * .012)) * 16; }

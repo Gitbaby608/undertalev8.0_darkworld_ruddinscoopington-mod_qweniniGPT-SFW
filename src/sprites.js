@@ -8,9 +8,16 @@ const DPR = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
 import { NPCS } from './data.js';
 
 export const SPR = {};
+// ids whose sprites have translucent parts (banners/warnings): excluded from the GL
+// character mask so post-FX never paints a solid blob behind their transparent corners.
+// mkSpr() adds late-baked ids to this set via its returned {hide} controller.
+export const NOMASK = new Set(['bg', 'bub', 'txt0', 'txt1', 'txt2', 'warn', 'warnFork', 'warnStar']);
 
 // mkSpr(id, drawFn)  OR  mkSpr(id, width, height, drawFn).
 // A draw fn may carry its own .w/.h (used by emojiSprite) as the default size.
+// Returns {hide} — call hide() for sprites baked AFTER mask.js has run (mask.js bakes
+// solid GL masks at import time; late-baked translucent sprites must opt out or they'd
+// render as a faint sprite with a glowing blob behind them).
 export function mkSpr(id, w, h, drawFn) {
   if (typeof w === 'function') { drawFn = w; w = Math.round(drawFn.w || 64); h = Math.round(drawFn.h || 64); }
   const cv = document.createElement('canvas');
@@ -20,6 +27,7 @@ export function mkSpr(id, w, h, drawFn) {
   s.textAlign = 'center';
   if (drawFn) drawFn(s);
   SPR[id] = Object.assign(cv, { w, h });
+  return { hide: () => NOMASK.add(id) };
 }
 
 function bl(s, cx, cy, r, a) { s.globalAlpha = a; s.beginPath(); s.arc(cx, cy, r, 0, 6.2832); s.fill(); }
@@ -184,7 +192,7 @@ mkSpr('b12', BS, s => { // spinning mint pinwheel (orbiting spiral)
   s.restore();
 });
 export const BSPR = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'b10', 'b11', 'b12'];
-export const bspr = b => b.s;
+export const bspr = b => b.s || 'b1';
 
 // Pulsing warning markers drawn under incoming attacks (the enemy's moves are visible!).
 mkSpr('warn', 44, s => {
@@ -195,6 +203,23 @@ mkSpr('warn', 44, s => {
   s.fillStyle = '#ff2f4d';
   s.beginPath(); s.moveTo(22, 13); s.lineTo(32, 22); s.lineTo(22, 31); s.lineTo(12, 22); s.closePath(); s.fill();
   s.fillStyle = '#fff'; s.font = 'bold 15px monospace'; s.textBaseline = 'middle'; s.fillText('!', 22, 23);
+});
+mkSpr('warnFork', 44, s => { // lock-on reticle: the fork attack tracks YOU before splitting
+  s.strokeStyle = '#ffe98a'; s.lineWidth = 3;
+  s.beginPath(); s.arc(22, 22, 15, 0, 6.2832); s.stroke();
+  for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+    s.beginPath(); s.moveTo(22 + dx * 6, 22 + dy * 6); s.lineTo(22 + dx * 21, 22 + dy * 21); s.stroke();
+  }
+  s.fillStyle = '#ff2f4d'; bl(s, 22, 22, 4, 1);
+});
+mkSpr('warnStar', 44, s => { // glitter star outline: marks where the starburst erupts
+  s.fillStyle = '#fff'; s.beginPath();
+  for (let k = 0; k < 10; k++) {
+    const a = -Math.PI / 2 + k * Math.PI / 5, R = k % 2 ? 8 : 20;
+    k ? s.lineTo(22 + Math.cos(a) * R, 22 + Math.sin(a) * R) : s.moveTo(22 + Math.cos(a) * R, 22 + Math.sin(a) * R);
+  }
+  s.closePath(); s.fill();
+  s.fillStyle = '#9c79ff'; s.beginPath(); s.arc(22, 22, 7, 0, 6.2832); s.fill();
 });
 
 // Text banners baked once (TXR supersample) — no per-frame font rasterisation.

@@ -19,7 +19,8 @@ import { c, BR, BRV } from './draw.js';
 import { MC } from './mask.js';
 import { hero } from './game.js';
 
-let glF = () => {};
+// exported so the classic-script bundle (boot-classic) can rebind it on context loss
+export let glF = () => {};
 const glOpts = { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance' };
 
 // ===== Undertale-style margin fitter =====
