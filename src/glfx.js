@@ -44,31 +44,57 @@ let fitDirty = true; // re-measure on next frame after resize/orientation/conten
 })();
 export function fitGame() {
   const gameEl = $('#game');
-  if (!gameEl || !fitDirty) return;
+  if (!gameEl) return;
+  const wasDirty = fitDirty;
   fitDirty = false;
   const prev = gameEl.style.getPropertyValue('--fit');
+  // Viewport probe: #game's width is a deterministic CSS calc (800px * --fit), so the
+  // viewport size can be read off it while --fit is temporarily pinned to 1. This runs
+  // EVERY frame on purpose: browsers fire no resize events while a mobile URL bar
+  // slides away or a window-manager overlay shrinks the usable area, and visualViewport
+  // isn't universally supported — polling guarantees margins reappear within one frame.
+  // Cheap no-op when nothing changed (the final write below is skipped if the value is
+  // identical, so no style invalidation / reflow feedback loop).
   gameEl.style.setProperty('--fit', '1');
-  const bw = gameEl.offsetWidth, bh = gameEl.offsetHeight; // forces layout at fit=1
+  const bw = gameEl.offsetWidth; // forces layout at fit=1 → equals the viewport width
   if (prev) gameEl.style.setProperty('--fit', prev); else gameEl.style.removeProperty('--fit');
-  if (!(bw > 0 && bh > 0)) return; // nothing measurable (jsdom / hidden tab): keep CSS guess
+  if (!(bw > 0)) return; // nothing measurable (hidden tab): keep the CSS guess
   const vw = innerWidth || document.documentElement.clientWidth || bw;
   // 100vh in CSS is the LARGE (browser-UI-hidden) viewport on mobile — subtract the
   // small viewport height so the box can never overflow when the URL bar reappears.
   const vh = Math.min(innerHeight || Infinity,
     (window.visualViewport && window.visualViewport.height) || Infinity,
-    document.documentElement.clientHeight || Infinity) || bh;
+    document.documentElement.clientHeight || Infinity) || bw;
   const padX = 34, padY = 34; // body padding + safety, same allowance as the CSS guess
-  // Two refinement passes: #hud/#buttons flex-wrap at narrow widths, so the unscaled
-  // layout HEIGHT depends on the chosen width — re-measure at the new scale until it
-  // settles. Each pass only shrinks or closely tracks the box, so this converges and
-  // can never push content off-screen.
-  let fit = Math.min((vw - padX) / bw, (vh - padY) / bh) * SCALE;
-  for (let pass = 0; pass < 2; pass++) {
-    gameEl.style.setProperty('--fit', String(fit));
-    const h2 = gameEl.offsetHeight; // layout height AT this scale
-    if (!(h2 > 0)) break;
-    fit = Math.max(.05, Math.min(fit * (vh - padY) / h2, (vw - padX) / bw * SCALE));
+  const fits = f => gameEl.offsetWidth <= vw - padX && gameEl.offsetHeight <= vh - padY;
+  const cur = parseFloat(prev);
+  // Idle frames: do nothing unless the CURRENTLY applied scale no longer fits, checked
+  // by measuring the real layout box at that scale. Catches wrapped-row growth and any
+  // viewport shrink that fired no resize event — including a stale OVERSIZED value left
+  // by an earlier mis-fit, which a pure clamp comparison cannot detect.
+  if (!wasDirty) {
+    if (!(cur > 0)) return;
+    if (fits(cur)) return;
   }
+  // Find the LARGEST scale whose measured box fits both axes via bisection between
+  // lo = a known-fitting scale and hi = the naive upper bound (viewport clamp × SCALE).
+  // Why not the old multiplicative refinement (fit *= avail/measured)? The layout
+  // HEIGHT GROWS with the scale (font-size ∝ fit, plus flex-wrap strips), giving the
+  // iteration slope |1 - dh/dfit · avail/h| > 1 near the fixed point — it OSCILLATED
+  // (≈0.74 ↔ ≈0.90) and landed on the too-large value half the time, pushing the
+  // rainbow margins off screen. Bisection halves the bracket per probe: provably
+  // convergent, and the result always sits at or below a verified-fitting scale, so it
+  // can never ship an oversized value. 12 probes ≈ ±0.0002 of the bracket — sub-pixel.
+  const hi = Math.min((vw - padX) / 800, (vh - padY) / 796) * SCALE;
+  let lo = (cur > 0 && cur <= hi && fits(cur)) ? cur : .05;
+  if (lo === .05) { gameEl.style.setProperty('--fit', '0.05'); lo = fits(.05) ? .05 : NaN; }
+  if (!(lo >= 0)) return; // even the floor doesn't fit: leave the CSS guess alone
+  for (let i = 0; i < 12 && hi - lo > .0005; i++) {
+    const mid = (lo + hi) / 2;
+    gameEl.style.setProperty('--fit', String(mid));
+    if (fits(mid)) lo = mid; else hi = mid;
+  }
+  const fit = lo; // guaranteed fitting; largest such scale within the probe tolerance
   gameEl.style.setProperty('--fit', String(fit));
 }
 const gl = $('#gl').getContext('webgl', glOpts) || $('#gl').getContext('experimental-webgl', glOpts);
