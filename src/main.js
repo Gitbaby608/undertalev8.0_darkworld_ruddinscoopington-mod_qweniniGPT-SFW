@@ -6,7 +6,7 @@ import { S } from './state.js';
 import { NEWS } from './data.js';
 import { loadRemoteAudio } from './audio.js';
 import { draw, x } from './draw.js';
-import { renderFX } from './glfx.js';
+import { renderFX, fitGame } from './glfx.js';
 import { update, updateUI, bindControls } from './game.js';
 
 $('#tk').textContent = '📺 NEWS SNAPSHOT (Oct 20, 2026, not live): ' + NEWS.join('  🏳️‍🌈  ') + '  🏳️‍🌈  ';
@@ -17,6 +17,7 @@ function loop(now) {
   // rAF must be re-registered FIRST: if any stage below throws (e.g. a simulated GL
   // driver error), the loop keeps pumping instead of dying silently.
   requestAnimationFrame(loop);
+  fitGame(); // Undertale-margin fitter: cheap no-op unless a resize/content change flagged it
   update(dt);
   x.save();
   if (S.shake > 0) { x.translate((Math.random() * 2 - 1) * S.shake, (Math.random() * 2 - 1) * S.shake); S.shake *= .86; }

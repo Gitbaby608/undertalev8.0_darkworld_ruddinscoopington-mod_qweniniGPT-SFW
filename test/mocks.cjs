@@ -79,6 +79,21 @@ async function bootGame() {
   win.speechSynthesis = { cancel: () => {}, speak: () => {} };
   win.requestAnimationFrame = cb => { win.__rafCbs.push(cb); return win.__rafCbs.length; };
   win.__rafCbs = [];
+  // jsdom has no layout: offsetWidth/offsetHeight are always 0, so the margin fitter's
+  // measurement guard would never see a real value. Emulate a simple layout model so
+  // tests can verify the fitter actually writes --fit and clamps it to the viewport:
+  // width = 800*fit, height = max(796, 660)*fit (matches #game's CSS).
+  Object.defineProperty(win.HTMLElement.prototype, 'offsetWidth', { get() {
+    if (this.id === 'game') return 800 * fitOf(this); return 0; } });
+  Object.defineProperty(win.HTMLElement.prototype, 'offsetHeight', { get() {
+    if (this.id === 'game') return 796 * fitOf(this); return 0; } });
+  function fitOf(el) {
+    const v = parseFloat(el.style.getPropertyValue('--fit'));
+    return Number.isFinite(v) && v > 0 ? v : .54; // ~CSS guess at 1280×753 default window
+  }
+  // jsdom's documentElement.clientHeight is always 0; emulate the SMALL viewport
+  // height (innerHeight minus a browser chrome bar) so the fitter's vh clamp is tested.
+  Object.defineProperty(win.Element.prototype, 'clientHeight', { get() { return win.innerHeight - 15; } });
   // deterministic frame clock: pump() drives it manually via the rAF queue above
   win.performance.now = () => win.__now || (win.__now = 1000);
 

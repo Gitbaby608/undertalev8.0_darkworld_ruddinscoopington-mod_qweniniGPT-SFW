@@ -21,6 +21,56 @@ import { hero } from './game.js';
 
 let glF = () => {};
 const glOpts = { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance' };
+
+// ===== Undertale-style margin fitter =====
+// CSS cannot measure an element's own layout height, so a pure-CSS --fit clamp can
+// under-estimate it — the box then overflows and its rainbow margins get pushed off
+// screen (exactly what happened). This recomputes --fit from the REAL unscaled layout
+// size: temporarily set --fit to 1 (#game's width/height are deterministic functions
+// of it), read offsetWidth/offsetHeight, restore. The box is then scaled to occupy
+// ~82% of each viewport axis, guaranteeing ≈9% animated-rainbow margin all around at
+// any window size / zoom / content-wrap state. Guarded against reflow feedback loops
+// (only writes when the value actually changes) and zero sizes (jsdom/headless tabs).
+const SCALE = .82; // near-fullscreen with Undertale-style margins
+let fitDirty = true; // re-measure on next frame after resize/orientation/content change
+(function initFitter() {
+  const gameEl = $('#game');
+  if (!gameEl) return;
+  addEventListener('resize', () => { fitDirty = true; }, { passive: true });
+  addEventListener('orientationchange', () => { fitDirty = true; });
+  // HUD/buttons wrap at narrow widths → layout height grows non-linearly with --fit;
+  // watch #game itself so any such change schedules a remeasure.
+  try { new ResizeObserver(() => { fitDirty = true; }).observe(gameEl); } catch (e) {}
+})();
+export function fitGame() {
+  const gameEl = $('#game');
+  if (!gameEl || !fitDirty) return;
+  fitDirty = false;
+  const prev = gameEl.style.getPropertyValue('--fit');
+  gameEl.style.setProperty('--fit', '1');
+  const bw = gameEl.offsetWidth, bh = gameEl.offsetHeight; // forces layout at fit=1
+  if (prev) gameEl.style.setProperty('--fit', prev); else gameEl.style.removeProperty('--fit');
+  if (!(bw > 0 && bh > 0)) return; // nothing measurable (jsdom / hidden tab): keep CSS guess
+  const vw = innerWidth || document.documentElement.clientWidth || bw;
+  // 100vh in CSS is the LARGE (browser-UI-hidden) viewport on mobile — subtract the
+  // small viewport height so the box can never overflow when the URL bar reappears.
+  const vh = Math.min(innerHeight || Infinity,
+    (window.visualViewport && window.visualViewport.height) || Infinity,
+    document.documentElement.clientHeight || Infinity) || bh;
+  const padX = 34, padY = 34; // body padding + safety, same allowance as the CSS guess
+  // Two refinement passes: #hud/#buttons flex-wrap at narrow widths, so the unscaled
+  // layout HEIGHT depends on the chosen width — re-measure at the new scale until it
+  // settles. Each pass only shrinks or closely tracks the box, so this converges and
+  // can never push content off-screen.
+  let fit = Math.min((vw - padX) / bw, (vh - padY) / bh) * SCALE;
+  for (let pass = 0; pass < 2; pass++) {
+    gameEl.style.setProperty('--fit', String(fit));
+    const h2 = gameEl.offsetHeight; // layout height AT this scale
+    if (!(h2 > 0)) break;
+    fit = Math.max(.05, Math.min(fit * (vh - padY) / h2, (vw - padX) / bw * SCALE));
+  }
+  gameEl.style.setProperty('--fit', String(fit));
+}
 const gl = $('#gl').getContext('webgl', glOpts) || $('#gl').getContext('experimental-webgl', glOpts);
 
 if (!gl) {

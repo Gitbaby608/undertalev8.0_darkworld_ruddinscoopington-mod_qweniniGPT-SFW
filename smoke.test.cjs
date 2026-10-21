@@ -63,7 +63,15 @@ const { bootGame, pump, glStats, setGlThrowing } = require('./test/mocks.cjs');
   // and NO error occurred outside the crash window.
   const cleanErrors = errors.length - caught;
   console.log('errors outside crash window:', cleanErrors, cleanErrors === 0 ? 'PASS' : 'FAIL');
-  const pass = !escaped && resumed && nonFinite === 0 && cleanErrors === 0;
+  // Undertale-margin fitter: with the mock layout model it must actually run and pin
+  // 
+  // fit ≈ .82*(753-34)/796).
+  const expectFit = .82 * (1024 - 34) / 800; // width-constrained mock layout
+  const fitVal = parseFloat(btn('#game').style.getPropertyValue('--fit'));
+  const fitOK = Number.isFinite(fitVal) && Math.abs(fitVal - expectFit) < .02;
+  console.log('margin fitter --fit:', fitVal, 'expected ~', expectFit.toFixed(3), fitOK ? 'PASS' : 'FAIL');
+
+  const pass = !escaped && resumed && nonFinite === 0 && cleanErrors === 0 && fitOK;
   console.log(pass ? 'SMOKE TEST PASS' : 'SMOKE TEST FAIL');
   process.exit(pass ? 0 : 1);
 })().catch(e => { console.log('BOOT/EVAL ERROR:', e.message); process.exit(1); });
