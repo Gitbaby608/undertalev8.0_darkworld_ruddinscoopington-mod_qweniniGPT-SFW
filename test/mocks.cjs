@@ -51,9 +51,10 @@ function mkGL() {
 // Boot the game against the mocks above. jsdom does not execute <script type=module>,
 // so instead: build a DOM from index.html's body markup, keep jsdom's window/document
 // as LIVE globals for the whole session (rAF callbacks fire later and still need them),
-// and import src/main.js as a REAL Node ESM graph — relative imports resolve exactly
-// like in a browser. One boot per process: the module graph shares state via S.
-// Honours GAME_HTML=<path> to test other revisions of the page.
+// and boot the engine either as a REAL Node ESM graph (src/main.js; relative imports
+// resolve exactly like in a browser) or by evaluating src/boot-classic.js — the exact
+// classic bundle file:// users get — when GAME_CLASSIC=1 is set. One boot per process:
+// the module graph shares state via S. Honours GAME_HTML=<path> for other page revisions.
 let bootedWin = null;
 async function bootGame(opts = {}) {
   if (bootedWin) return bootedWin; // singleton: ES modules can't be re-instantiated
@@ -137,9 +138,61 @@ async function bootGame(opts = {}) {
   for (const k of ['innerWidth', 'innerHeight']) {
     Object.defineProperty(g, k, { get: () => win[k], configurable: true });
   }
-  await import('../src/main.js');
+  if (process.env.GAME_CLASSIC) {
+    // Evaluate the exact classic bundle a file:// browser would run. It's an IIFE that
+    // only touches window/document globals — no exports needed by the test harness.
+    const src = fs.readFileSync(require('path').join(__dirname, '..', 'src', 'boot-classic.js'), 'utf8');
+    // eslint-disable-next-line no-eval
+    (0, eval)(src);
+  } else {
+    await import('../src/main.js');
+  }
   bootedWin = win;
   return win;
+}
+
+// Read live game state. ESM boot: import src/state.js. Classic boot: the bundle is an
+// IIFE with no exports, so re-read the source to find its module block and evaluate just
+// that block (it only references already-live globals + S itself), which returns S.
+async function getState() {
+  if (!process.env.GAME_CLASSIC) return (await import('../src/state.js')).S;
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'boot-classic.js'), 'utf8');
+  const marker = '// ==================== src/state.js ====================';
+  const start = src.indexOf(marker);
+  if (start < 0) throw new Error('state block not found in boot-classic.js');
+  const open = src.indexOf('{', start);
+  let depth = 0, i = open;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) break; }
+  }
+  const block = src.slice(open, i + 1) + '\nreturn S$state;';
+  return (0, eval)(block);
+}
+
+// Read another exported binding from a classic-boot block (same trick as getState).
+async function getExport(file, name) {
+  if (!process.env.GAME_CLASSIC) {
+    const mod = await import('../src/' + file);
+    return mod[name];
+  }
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'boot-classic.js'), 'utf8');
+  const marker = `// ==================== src/${file} ====================`;
+  const start = src.indexOf(marker);
+  if (start < 0) throw new Error('block not found: ' + file);
+  const open = src.indexOf('{', start);
+  let depth = 0, i = open;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) break; }
+  }
+  const renamed = /[A-Za-z_$][\w$]*\$/.test(name) ? name : name + '$' + file.replace(/\.js$/, '');
+  const block = src.slice(open, i + 1) + `\nreturn (typeof ${renamed} !== 'undefined') ? ${renamed} : (typeof ${name} !== 'undefined' ? ${name} : undefined);`;
+  return (0, eval)(block);
 }
 
 // Synchronously pump n animation frames; collects exceptions thrown by callbacks.
@@ -152,4 +205,4 @@ function pump(win, n, errors) {
   }
 }
 
-module.exports = { bootGame, pump, glStats, setGlThrowing: v => { glThrowing = v; } };
+module.exports = { bootGame, pump, glStats, setGlThrowing: v => { glThrowing = v; }, getState, getExport };
