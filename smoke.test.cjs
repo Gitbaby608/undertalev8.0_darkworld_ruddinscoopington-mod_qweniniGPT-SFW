@@ -63,10 +63,12 @@ const { bootGame, pump, glStats, setGlThrowing } = require('./test/mocks.cjs');
   // and NO error occurred outside the crash window.
   const cleanErrors = errors.length - caught;
   console.log('errors outside crash window:', cleanErrors, cleanErrors === 0 ? 'PASS' : 'FAIL');
-  // Undertale-margin fitter: with the mock layout model it must actually run and pin
-  // 
-  // fit ≈ .82*(753-34)/796).
-  const expectFit = .82 * (1024 - 34) / 800; // width-constrained mock layout
+  // Undertale-margin fitter: with the mock layout model (width = 800*fit,
+  // height = 796*fit) it must actually run and pin the HEIGHT-constrained value:
+  // vh = innerHeight - 15 chrome bar (mock clientHeight), so
+  // fit ≈ .82*(innerHeight-15-34)/796. jsdom's default window is 1024x768, where
+  // .82*(768-15-34)/796 ≈ .751 < .82*(1024-34)/800 ≈ 1.015 → height binds.
+  const expectFit = .82 * (win.innerHeight - 15 - 34) / 796; // height-constrained mock layout
   const fitVal = parseFloat(btn('#game').style.getPropertyValue('--fit'));
   const fitOK = Number.isFinite(fitVal) && Math.abs(fitVal - expectFit) < .02;
   console.log('margin fitter --fit:', fitVal, 'expected ~', expectFit.toFixed(3), fitOK ? 'PASS' : 'FAIL');

@@ -79,6 +79,9 @@ async function bootGame() {
   win.speechSynthesis = { cancel: () => {}, speak: () => {} };
   win.requestAnimationFrame = cb => { win.__rafCbs.push(cb); return win.__rafCbs.length; };
   win.__rafCbs = [];
+  // jsdom lacks ResizeObserver: the margin fitter's content-change watcher would be
+  // a no-op. Provide a minimal stub that records callbacks so tests can trigger them.
+  win.ResizeObserver = function (cb) { this.__cb = cb; this.observe = () => {}; this.disconnect = () => {}; };
   // jsdom has no layout: offsetWidth/offsetHeight are always 0, so the margin fitter's
   // measurement guard would never see a real value. Emulate a simple layout model so
   // tests can verify the fitter actually writes --fit and clamps it to the viewport:
