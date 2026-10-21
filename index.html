@@ -8,23 +8,21 @@
 @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
 *{box-sizing:border-box}
 body{
- /* block + overflow:auto (NOT grid/place-items:center): a centered grid whose item is
-    taller than the viewport gets clipped at BOTH ends and cannot be scrolled — that was
-    cropping the buttons/log off-screen on short windows */
+ /* flex centering is safe now: #game always scales down to fit the viewport, so it can
+    never overflow and get clipped at the ends (the old grid/place-items:center bug) */
  margin:0;min-height:100vh;overflow:auto;padding:12px;
+ display:flex;align-items:center;justify-content:center;
  font-family:'Press Start 2P',monospace;color:white;
  background:linear-gradient(120deg,#ff65b7,#ffc857,#67f4df,#9c79ff,#ff65b7);
  background-size:400% 400%;animation:bg 9s ease infinite
 }
 @keyframes bg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
-/* The whole panel scales to FIT the viewport (both axes) like a classic arcade cabinet:
-   --fit = fraction of the viewport available after padding/borders, clamped ≤1 so it
-   never upscales past native 800px. Panel width = 800*--fit, and font-size scales with
-   it so HUD/log/buttons/ticker shrink in lockstep — nothing is ever cropped, and short
-   windows don't force scrolling either. */
-#game{--fit:min(1, (100vw - 34px) / 800, (100vh - 34px) / 796);
+/* Undertale-style boss box: the panel targets ~40% of the viewport (≈30% margins on
+   each axis), centered both horizontally AND vertically. --fit is still clamped by the
+   viewport so tiny windows can never crop it — it just shrinks further to fit. */
+#game{--fit:min((100vw - 34px) * 0.40 / 800, (100vh - 34px) * 0.40 / 796);
  width:calc(800px * var(--fit));font-size:calc(9px * var(--fit));
- margin:0 auto;background:#100b2d;border:5px solid white;
+ background:#100b2d;border:5px solid white;
  border-radius:12px;overflow:hidden;box-shadow:0 0 30px #ff65e7}
 #hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:calc(12px*var(--fit));
  padding:calc(12px*var(--fit));font-size:inherit;line-height:2;background:#1c1041}
