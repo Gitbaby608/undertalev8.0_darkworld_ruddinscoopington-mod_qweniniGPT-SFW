@@ -14,6 +14,7 @@ function mk2d() {
     save: noop, restore: noop, beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
     arc: noop, arcTo: noop, rect: noop, fill: noop, stroke: noop, fillRect: noop, clearRect: noop,
     strokeRect: noop, fillText: noop, measureText: () => ({ width: 10 }), drawImage: noop,
+    ellipse: noop, quadraticCurveTo: noop, bezierCurveTo: noop, setLineDash: noop,
     createLinearGradient: () => ({ addColorStop: noop }),
     createRadialGradient: () => ({ addColorStop: noop }),
     getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData: noop,

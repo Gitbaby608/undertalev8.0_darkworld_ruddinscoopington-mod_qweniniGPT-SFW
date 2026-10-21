@@ -105,6 +105,7 @@ const W=800,H=460;
 c.width=W;c.height=H;
 let state='menu',t=0,last=0,hp=100,bhp=180,coins=4,turn=1,mercy=0,score=0;
 let bullets=[],keys={},audio=null,music=null,mute=false,inv=0,shake=0;
+let tele=[],pat=null,busy=false,lungeT=-1,lungeName='',patIdx=0;const DODGE_MS=6800;
 // particles: fixed pool + swap-remove (allocation-free frames, no GC hitches)
 const particles=[];let pFree=[];
 const hero={x:400,y:365};
@@ -177,13 +178,13 @@ function end(win,spared=false){
  $('#again').onclick=reset;
  if(win)sfx('win');
 }
-function hurtBoss(d){
+function hurtBoss(d){busy=true;syncBtns();
  if(state!=='battle')return;
  bhp=Math.max(0,bhp-d);score+=d;shake=7;zoomFx(1);sfx('hit');
  burst(boss.x,boss.y,20,pick(['#ff54bf','#fff16b','#63f6ff']));
  log(`💥 SPATULA STRIKE! ${d} damage!`);
  if(!bhp){end(true);return}
- updateUI();setTimeout(()=>{if(state==='battle')enemyTurn()},500);
+ updateUI();enemyTurn();
 }
 function hurtHero(d){
  if(inv>0||state!=='dodge')return;
@@ -191,39 +192,62 @@ function hurtHero(d){
  burst(hero.x,hero.y,15,'#ff477e');updateUI();
  if(!hp)end(false);
 }
-function bullet(px,py,vx,vy,col,r=7){
- bullets.push({x:px,y:py,vx,vy,col,r});
+function bullet(px,py,vx,vy,col,r=7,sprId){
+ bullets.push({x:px,y:py,vx,vy,col,r,s:sprId||'b1'});
 }
-function attackPattern(){
- bullets=[];state='dodge';let pattern=Math.floor(Math.random()*4);
- log('⚠️ DODGE THE DESSERT! Use WASD or the arrow keys!');
- if(pattern===0){
-  for(let i=0;i<15;i++)setTimeout(()=>{
-   if(state==='dodge')bullet(rand(30,770),-10,rand(-.4,.4),rand(2,4),pick(['#ff53c5','#fff16b','#6bf4ff']));
-  },i*90);
- }else if(pattern===1){
-  for(let i=0;i<32;i++){
-   let a=i*Math.PI/16;
-   bullet(boss.x,boss.y,Math.cos(a)*2.2,Math.sin(a)*2.2,i%2?'#ff65d5':'#6bf4ff',6);
-  }
- }else if(pattern===2){
-  for(let i=0;i<12;i++){
-   if(i%5!==Math.floor(hero.x/67))bullet(i*68+25,0,0,3.3,'#e5b16d',10);
-   if(i%5!==Math.floor(hero.x/67))bullet(i*68+25,H,0,-3.3,'#e5b16d',10);
-  }
- }else{
-  for(let i=0;i<7;i++)setTimeout(()=>{
-   if(state!=='dodge')return;
-   let a=Math.atan2(hero.y-boss.y,hero.x-boss.x);
-   bullet(boss.x,boss.y,Math.cos(a)*2.5,Math.sin(a)*2.5,'#ff4545');
-  },i*160);
- }
+// Seven UNIQUE boss attacks — FRAME-DRIVEN from update() (never setTimeout), fully
+// visible while dodging, each with its own baked sprite + telegraphed warnings.
+const PATTERNS=[
+ {id:'rain',name:'\u{1F327}\uFE0F SPRINKLE STORM!',warn:'ATK0',phases:[500,1000,1000,1000,1300],
+  run(ph){if(ph===0){for(let i=0;i<4;i++)tele.push({x:rand(40,760),y:rand(270,395),t:rand(500,900),dur:900,w:'warn'})}
+   else if(ph<=3){const gap=rand(80,700);for(let x=30;x<780;x+=60){if(Math.abs(x-gap)<55)continue;bullet(x+rand(-8,8),-14,rand(-.3,.3),rand(2.1,3.2),0,7,'b6')}
+    if(ph===2)for(let i=0;i<5;i++)bullet(rand(60,740),rand(270,400),rand(-1.8,1.8),rand(-.6,.6),0,6,'b2')}
+   else{const gap=rand(100,700);for(let x=30;x<780;x+=60){if(Math.abs(x-gap)<70)continue;bullet(x,-14,0,2.6,0,7,'b6')}}}},
+ {id:'ring',name:'\u{1F4AB} JELLY RINGSHOT!',warn:'ATK1',phases:[600,1100,1100,1100,1400],
+  run(ph){if(ph===0){tele.push({x:Math.max(60,Math.min(740,hero.x)),y:Math.max(280,Math.min(390,hero.y)),t:550,dur:550,w:'warn'});return}
+   const n=18+ph*2,sp=1.5+ph*.25,cx=Math.max(70,Math.min(730,hero.x+rand(-130,130))),cy=Math.max(275,Math.min(395,hero.y+rand(-60,60)));
+   for(let i=0;i<n;i++){const a=i*Math.PI*2/n+ph*.35;bullet(cx,cy,Math.cos(a)*sp,Math.sin(a)*sp,0,6,i%2?'b3':'b2')}}},
+ {id:'wall',name:'\u{1F9C7} WAFFLE WALLS!',warn:'ATK2',phases:[900,1000,1000,1000,1400],
+  run(ph){if(ph===0){this.gap=rand(80,700);return}
+   this.gap=Math.max(80,Math.min(700,this.gap+rand(-110,110)));const down=ph%2===1;
+   for(let i=0;i<12;i++){const x=i*68+25;if(Math.abs(x-this.gap)<60)continue;bullet(x,down?-14:474,0,down?3:-3,0,12,'b11')}}},
+ {id:'bomb',name:'\u{1F352} CHERRY BOMBARDMENT!',warn:'ATK3',phases:[800,900,900,800,700,700],
+  run(ph){if(ph<=2){for(let i=0;i<3;i++)tele.push({x:rand(60,740),y:rand(272,398),t:900,dur:900,w:'warn'})}
+   else{for(let i=0;i<3;i++){const cx=rand(60,740),cy=rand(272,398);
+    for(let k=0;k<8;k++){const a=k*Math.PI/4+ph*.3;bullet(cx,cy,Math.cos(a)*2.2,Math.sin(a)*2.2,0,7,'b10')}}}}},
+ {id:'spiral',name:'\u{1F300} SCOOP SPIRAL!',warn:'ATK4',phases:[400,300,300,300,300,300,300,300,300,300,300,300],
+  run(ph){if(ph===0)return;const t=ph*.55;this.a=(this.a||0)+.42;
+   for(const off of [0,Math.PI]){const a=this.a+off,sx=boss.x+Math.cos(a*.6)*40,sy=boss.y+Math.sin(a*.6)*20;
+    bullets.push({x:sx,y:sy,R:14+t*6,a:a,w:.05,ox:sx,oy:sy,dr:0,s:'b12',r:6,life:320-t*22})}
+   if(ph===6)for(let i=0;i<10;i++){const a=i*Math.PI*2/10;bullet(boss.x,boss.y,Math.cos(a)*1.8,Math.sin(a)*1.8,0,6,'b3')}}},
+ {id:'fork',name:'\u{1F374} FORKED SUNDAE!',warn:'ATK5',phases:[600,900,900,900,800,700],
+  run(ph){if(ph===0)return;
+   tele.push({x:Math.max(40,Math.min(760,hero.x)),y:Math.max(268,Math.min(400,hero.y)),t:750,dur:750,w:'warnFork'});
+   if(ph>=4){const a=rand(0,6.28);bullets.push({x:boss.x,y:boss.y,vx:0,vy:1.5,sp:1.5,s:'b5',r:6,home:1});
+    bullet(boss.x,boss.y,Math.cos(a)*2,Math.sin(a)*2,0,6,'b9')}}},
+ {id:'star',name:'\u{1F31F} SUNDAY STARFALL!',warn:'ATK6',phases:[500,500,500,500,500,500,500,500,500,500,500,500],
+  run(ph){const R=150-ph*10;this.rot=(this.rot||0)+.5;
+   for(let k=0;k<3;k++){const a=this.rot+k*Math.PI*2/3,x=Math.max(40,Math.min(760,400+Math.cos(a)*R)),y=Math.max(270,Math.min(400,335+Math.sin(a)*R*.5));
+    tele.push({x:x,y:y,t:420,dur:420,w:'warnStar'})}
+   if(ph===10)for(let i=0;i<8;i++)bullet(i%2?-14:814,275+i*18,i%2?3.4:-3.4,0,0,6,'b6')}},
+];
+function startEnemyAttack(){
+ bullets=[];tele=[];state='dodge';dodgeTime=0;
+ const p=PATTERNS[patIdx++%PATTERNS.length];
+ pat={id:p.id,name:p.name,phase:0,pt:0};lungeT=0;lungeName=p.warn;
+ syncBtns();
+ log('\u{1F366} SIR SCOOPINGTON UNLEASHES '+p.name+' \u26A0\uFE0F Dodge!');
 }
 let dodgeTime=0;
-function enemyTurn(){if(state!=='battle')return;attackPattern();dodgeTime=0}
+function enemyTurn(){if(state!=='battle')return;startEnemyAttack()}
+// Turn-locked action buttons: greyed out from the moment you commit an action
+// until the boss attack is survived (prevents multiple attacks per turn).
+function syncBtns(){const dis=busy||state==='dodge'||state==='over';
+ document.querySelectorAll('[data-a]').forEach(b=>{b.disabled=dis})}
 function act(a){if(state==='attack'&&a==='fight'){strike();return}
- if(state!=='battle')return;
- if(a==='fight'){state='attack';atk={p:150,d:0};log('⚔️ TIMING! Hit SPACE / click / tap / FIGHT when the line is in the green!');return}
+ if(state!=='battle'||busy)return;
+ busy=true;
+ if(a==='fight'){busy=true;syncBtns();state='attack';atk={p:150,d:0};log('⚔️ TIMING! Hit SPACE / click / tap / FIGHT when the line is in the green!');return}
  if(a==='act'){
   const n=pick(npcs);mercy+=25;
   log(`${n[0]} ${n[1]}: "${pick(n[2])}" 💚 Mercy +25!`);
@@ -238,11 +262,12 @@ function act(a){if(state==='attack'&&a==='fight'){strike();return}
  }
  updateUI();
  if(mercy>=100){end(true,true);return}
- setTimeout(()=>{if(state==='battle')enemyTurn()},500);
+ enemyTurn();
 }
 function reset(){
  hp=100;bhp=180;coins=4;turn=1;mercy=0;score=0;
  hero.x=400;hero.y=365;bullets=[];pFree.push(...particles.splice(0));inv=0;
+ tele=[];pat=null;busy=false;lungeT=-1;syncBtns();
  updateUI();state='battle';dodgeTime=0;
  $('#overlay').style.display='none';log('🏡 The neighbours are counting on you. Probably.');
  audioStart();sfx('win');
@@ -321,7 +346,52 @@ mkSpr('b2',26,s=>{s.fillStyle='#8fe3ff';bl(s,13,13,11,1);s.strokeStyle='#2b8ba8'
 mkSpr('b3',26,s=>{s.fillStyle='#ff8fd0';bl(s,13,13,11,1);s.strokeStyle='#a82b78';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#862b64';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
 mkSpr('b4',26,s=>{s.fillStyle='#e5b16d';bl(s,13,13,11,1);s.strokeStyle='#8a5a1e';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#6b4315';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
 mkSpr('b5',26,s=>{s.fillStyle='#ff4545';bl(s,13,13,11,1);s.strokeStyle='#8f1414';s.lineWidth=2;s.beginPath();s.arc(13,13,11,0,6.2832);s.stroke();s.fillStyle='#6f0f0f';bl(s,9,10,1.6,1);bl(s,15,14,1.6,1);bl(s,13,8,1.6,1)});
-const BSPR=['b1','b2','b3','b4','b5'];
+const BS=34;
+mkSpr('b6',BS,s=>{s.save();s.translate(BS/2,BS/2);s.rotate(-.5);
+ ['#ff477e','#ffb84f','#fff36b','#56f5ad','#54dfff','#ae7cff'].forEach((c,i)=>{const a=i*1.05-1.6;
+  s.save();s.rotate(a);s.translate(0,-6);s.lineWidth=5;s.lineCap='round';
+  s.strokeStyle='#fff';s.beginPath();s.moveTo(0,-4);s.lineTo(0,4);s.stroke();
+  s.strokeStyle=c;s.beginPath();s.moveTo(0,-4);s.lineTo(0,4);s.stroke();s.restore()});s.restore()});
+mkSpr('b7',BS,s=>{s.save();s.translate(BS/2,BS/2);
+ for(let k=0;k<3;k++){s.rotate(2.094);
+  s.strokeStyle='#fff';s.lineWidth=7;s.lineCap='round';
+  s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(5,-7,11,-9);s.stroke();
+  s.strokeStyle=k===0?'#ff5ec8':k===1?'#8f5bff':'#ff2fa0';s.lineWidth=4;
+  s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(5,-7,11,-9);s.stroke()}
+ s.fillStyle='#fff';bl(s,0,0,4,1);s.fillStyle='#ff8fd0';bl(s,0,0,2.6,1);s.restore()});
+mkSpr('b8',BS,s=>{s.save();s.translate(BS/2,BS/2);s.beginPath();
+ for(let i=0;i<10;i++){const r=i%2?6:14,a=i*Math.PI/5-Math.PI/2;
+  i?s.lineTo(Math.cos(a)*r,Math.sin(a)*r):s.moveTo(Math.cos(a)*r,Math.sin(a)*r)}
+ s.closePath();s.fillStyle='#fff';s.fill();s.fillStyle='#ffe98a';s.fill();
+ s.fillStyle='#fff';bl(s,-3,-4,2.2,.95);s.restore()});
+mkSpr('b9',BS,s=>{s.save();s.translate(BS/2,BS/2);
+ s.fillStyle='#fff';bl(s,0,0,12,1);s.fillStyle='#6b3a12';bl(s,0,0,10,1);
+ s.fillStyle='#ff8b3d';bl(s,0,1,7,1);s.fillStyle='#ffd23b';bl(s,-1,0,4,1);
+ s.fillStyle='#fff';bl(s,-3,-4,2,.9);s.restore()});
+mkSpr('b10',BS,s=>{s.save();s.translate(BS/2,BS/2+2);
+ s.strokeStyle='#fff';s.lineWidth=4;s.lineCap='round';
+ s.beginPath();s.moveTo(0,-8);s.quadraticCurveTo(2,-13,7,-13);s.stroke();
+ s.fillStyle='#56f5ad';s.beginPath();s.ellipse(8,-13,4,2.2,-.5,0,6.2832);s.fill();
+ s.fillStyle='#fff';bl(s,0,1,11,1);s.fillStyle='#ff2f4d';bl(s,0,1,9,1);
+ s.fillStyle='#ff8b9d';bl(s,-3,-3,3,.95);s.restore()});
+mkSpr('b11',BS,s=>{s.save();s.translate(BS/2,BS/2);
+ s.fillStyle='#fff';s.fillRect(-13,-13,26,26);s.fillStyle='#e5b16d';s.fillRect(-11.5,-11.5,23,23);
+ s.strokeStyle='#8a5a1e';s.lineWidth=2;
+ for(let g=-7;g<=7;g+=7){s.beginPath();s.moveTo(g,-11.5);s.lineTo(g,11.5);s.stroke();
+  s.beginPath();s.moveTo(-11.5,g);s.lineTo(11.5,g);s.stroke()}s.restore()});
+mkSpr('b12',BS,s=>{s.save();s.translate(BS/2,BS/2);s.fillStyle='#fff';
+ for(let k=0;k<4;k++){s.save();s.rotate(k*Math.PI/2);
+  s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(11,-2,13,-9);s.quadraticCurveTo(4,-6,0,0);s.fill();s.restore()}
+ s.fillStyle='#56f5ad';
+ for(let k=0;k<4;k++){s.save();s.rotate(k*Math.PI/2);
+  s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(9,-2,11,-7);s.quadraticCurveTo(3,-5,0,0);s.fill();s.restore()}
+ s.fillStyle='#fff';bl(s,0,0,3,1);s.fillStyle='#2b8ba8';bl(s,0,0,1.8,1);s.restore()});
+// pulsing warning marker drawn under incoming attacks — enemy moves are VISIBLE
+mkSpr('warn',44,s=>{s.strokeStyle='#fff';s.lineWidth=3;s.beginPath();s.arc(22,22,17,0,6.2832);s.stroke();
+ s.fillStyle='#fff';s.beginPath();s.moveTo(22,9);s.lineTo(36,22);s.lineTo(22,35);s.lineTo(8,22);s.closePath();s.fill();
+ s.fillStyle='#ff2f4d';s.beginPath();s.moveTo(22,13);s.lineTo(32,22);s.lineTo(22,31);s.lineTo(12,22);s.closePath();s.fill();
+ s.fillStyle='#fff';s.font='bold 15px monospace';s.textBaseline='middle';s.fillText('!',22,23)});
+const BSPR=['b1','b2','b3','b4','b5','b6','b7','b8','b9','b10','b11','b12','warn'];
 const bspr=b=>b.s||'b1';
 // text banners baked once (TXR supersample) — no per-frame font rasterisation
 const TXR=3;
@@ -329,6 +399,13 @@ const txtSpr=(id,str,col)=>mkSpr(id,420*TXR,30*TXR,s=>{s.scale(TXR,TXR);s.fillSt
 txtSpr('txt0','DODGE THE DESSERT!','#fff');
 txtSpr('txt1','CHOOSE YOUR ACTION BELOW!','#fff');
 txtSpr('txt2','HIT THE GREEN! (SPACE / TAP)','#ffe98a');
+// Attack-name danger banners baked once per pattern (drawn over the boss windup).
+const txtWarn=(id,str)=>mkSpr(id,460*TXR,34*TXR,s=>{s.scale(TXR,TXR);
+ s.fillStyle='#5e0016';s.fillRect(0,0,460,34);
+ s.strokeStyle='#fff';s.lineWidth=3;s.strokeRect(2,2,456,30);
+ s.fillStyle='#ffe98a';s.font='12px "Press Start 2P",monospace';s.textBaseline='middle';
+ s.fillText(str,230,18)});
+PATTERNS.forEach(p=>txtWarn(p.warn,p.name));
 // ---- MASK system: the WebGL layer must ONLY affect characters, never the backdrop.
 // Each character sprite gets a sibling alpha mask (solid rounded blob, same geometry)
 // baked once via mkMask(); draw() records every character's position into CHARQ[];
@@ -408,7 +485,11 @@ function draw(){
  x.drawImage(SPR['bg'],0,0,W,H);
  CHARQ.length=0;
  for(const n of NPCS){updNpc(n,t,16.7);spr(n.id,n.x,n.y)}
- spr('boss',boss.x,boss.y+Math.sin(t*.004)*5);
+ for(const tl of tele){x.globalAlpha=.55+.45*Math.sin((1-tl.t/tl.dur)*12);spr(tl.w||'warn',tl.x,tl.y);x.globalAlpha=1}
+ let bx=boss.x,by=boss.y+Math.sin(t*.004)*5;
+ if(lungeT>=0){const p=lungeT/900,e=p<.3?p/.3:1-(p-.3)/.7;bx+=(hero.x-boss.x)*.35*e;by+=(hero.y-60-boss.y)*.35*e}
+ spr('boss',bx,by);
+ if(lungeT>=0&&SPR[lungeName])spr(lungeName,400,185);
  spr('hero',hero.x,hero.y);
  for(const b of bullets)spr(bspr(b),b.x,b.y);
  // one batched path per colour bucket (no per-particle beginPath/stroke)
@@ -435,8 +516,10 @@ function draw(){
  if(state==='attack')drawAtk();
  composeMsk();
 }
-function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='battle';log('💨 MISS! Too slow!');setTimeout(()=>{if(state==='battle')enemyTurn()},600)}}
+function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='battle';log('💨 MISS! Too slow!');enemyTurn()}}
  t+=dt;
+ if(lungeT>=0){lungeT+=dt;if(lungeT>900)lungeT=-1}
+ if(!mute&&state==='dodge'&&Math.floor(t/500)!==Math.floor((t-dt)/500))tone(300,.05,'square',.015);
  if(state==='dodge'){
   dodgeTime+=dt;
   if(keys.arrowleft||keys.a)hero.x-=4;
@@ -445,16 +528,28 @@ function update(dt){if(state==='attack'){atk.p+=7*dt/16.7;if(atk.p>650){state='b
   if(keys.arrowdown||keys.s)hero.y+=4;
   hero.x=Math.max(15,Math.min(785,hero.x));
   hero.y=Math.max(265,Math.min(405,hero.y));
-  bullets.forEach(b=>{b.x+=b.vx;b.y+=b.vy});
+  if(pat){const p=PATTERNS.find(q=>q.id===pat.id);pat.pt+=dt;
+   if(p&&pat.phase<p.phases.length&&pat.pt>=p.phases[pat.phase]){pat.pt-=p.phases[pat.phase];p.run(pat.phase);pat.phase++}}
+  const f=dt/16.7;
+  for(const b of bullets){if(b.home){const a=Math.atan2(hero.y-b.y,hero.x-b.x);b.vx+=(Math.cos(a)*b.sp-b.vx)*.035*f;b.vy+=(Math.sin(a)*b.sp-b.vy)*.035*f}
+   if(b.R!==undefined){b.a+=b.w*f;b.R+=b.dr*f;b.life-=f;b.x=b.ox+Math.cos(b.a)*b.R;b.y=b.oy+Math.sin(b.a)*b.R;if(b.life<=0)b.dead=1}}
+  for(let i=tele.length-1;i>=0;i--){const tl=tele[i];tl.t-=dt;
+   if(tl.t<=0){
+    if(tl.w==='warnFork'){const a0=Math.atan2(hero.y-tl.y,hero.x-tl.x);for(let k=-1;k<=1;k++)bullet(tl.x,tl.y,Math.cos(a0+k*.5)*2.6,Math.sin(a0+k*.5)*2.6,0,7,'b7')}
+    else if(tl.w==='warnStar'){for(let k=0;k<6;k++){const a=k*Math.PI/3+tl.x*.01;bullet(tl.x,tl.y,Math.cos(a)*2.1,Math.sin(a)*2.1,0,6,'b8')}}
+    else{for(let k=0;k<5;k++){const a=k*Math.PI*2/5;bullet(tl.x,tl.y,Math.cos(a)*1.9,Math.sin(a)*1.9,0,6,'b6')}burst(tl.x,tl.y,9,'#ffb14d')}
+    tele.splice(i,1);
+   }}
+  bullets.forEach(b=>{b.x+=b.vx*f;b.y+=b.vy*f});
   for(let i=bullets.length-1;i>=0;i--){
    const b=bullets[i];
-   if(b.x<-30||b.x>830||b.y<-30||b.y>490){bullets.splice(i,1);continue}
+   if(b.dead||b.x<-30||b.x>830||b.y<-30||b.y>490){bullets.splice(i,1);continue}
    if(Math.hypot(b.x-hero.x,b.y-hero.y)<b.r+10){
     bullets.splice(i,1);hurtHero(8);
    }
   }
-  if(dodgeTime>4800){
-   state='battle';bullets=[];turn++;coins++;updateUI();
+  if(dodgeTime>DODGE_MS){
+   state='battle';bullets=[];tele=[];pat=null;busy=false;syncBtns();turn++;coins++;updateUI();
    log('✨ YOU SURVIVED! +1 scoop coin. YOUR TURN!');
    if(turn%2===0){const n=pick(news);zoomFx(1);mercy=Math.min(90,mercy+10);log('📺 BREAKING (mid-fight!): '+n+' 🏳️‍🌈 Pride Power: Mercy +10!');['#e40303','#ff8c00','#ffed00','#008026','#004dff','#750787'].forEach(k=>burst(boss.x,boss.y,8,k));sheepBeep()}
   }
@@ -473,7 +568,8 @@ function loop(now){
 }
 let atk=null,bgm=null,sheepAud=null,sheepTO,fx=0,fxS=0;const BR={x:.5,y:.5,s:0};let BRVX=0,BRVY=0;function zoomFx(s){fx=1;fxS=s}
 function drawAtk(){const L=150,Tp=335,Wd=500,Hh=56;x.save();x.fillStyle='#000';x.fillRect(L,Tp,Wd,Hh);const g=x.createLinearGradient(L,0,L+Wd,0);g.addColorStop(0,'#ff3b3b');g.addColorStop(.35,'#ffd23b');g.addColorStop(.5,'#3bff7a');g.addColorStop(.65,'#ffd23b');g.addColorStop(1,'#ff3b3b');x.globalAlpha=.9;x.fillStyle=g;x.fillRect(L+4,Tp+4,Wd-8,Hh-8);x.globalAlpha=1;x.strokeStyle='#fff';x.lineWidth=4;x.strokeRect(L,Tp,Wd,Hh);x.fillStyle='#000';x.fillRect(atk.p-5,Tp-8,10,Hh+16);x.fillStyle=Math.floor(t/90)%2?'#fff':'#ff0';x.fillRect(atk.p-3,Tp-6,6,Hh+12);x.restore()}
-function strike(){if(state!=='attack'||!atk||atk.d)return;atk.d=1;const o=Math.abs(atk.p-400),d=Math.max(6,Math.round(50*(1-o/250)));state='battle';hurtBoss(d);log(o<25?'🌟 PERFECT! '+d+' damage!':'💥 Hit for '+d+'!')}
+function strike(){if(state!=='attack'||!atk||atk.d)return;atk.d=1; // atk.d guard: a second press can never swing twice
+const o=Math.abs(atk.p-400),d=Math.max(6,Math.round(50*(1-o/250)));state='battle';hurtBoss(d);log(o<25?'🌟 PERFECT! '+d+' damage!':'💥 Hit for '+d+'!')}
 addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();strike()}});$('#game').addEventListener('pointerdown',strike);
 const BGM_SRC=['https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','bgm.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='],SHEEP_SRC=['https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3','https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3','https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3','sheep.mp3','data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='];/* REMIX first — the sheep honks the remix */
 const DB=new Promise(r=>{try{const q=indexedDB.open('rumble',1);q.onupgradeneeded=()=>q.result.createObjectStore('f');q.onsuccess=()=>r(q.result);q.onerror=()=>r(null)}catch(e){r(null)}});
