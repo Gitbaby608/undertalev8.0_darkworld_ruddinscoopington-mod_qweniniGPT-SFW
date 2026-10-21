@@ -54,7 +54,7 @@ function mkGL() {
 // like in a browser. One boot per process: the module graph shares state via S.
 // Honours GAME_HTML=<path> to test other revisions of the page.
 let bootedWin = null;
-async function bootGame() {
+async function bootGame(opts = {}) {
   if (bootedWin) return bootedWin; // singleton: ES modules can't be re-instantiated
   const fs = require('fs');
   const html = fs.readFileSync(process.env.GAME_HTML || 'index.html', 'utf8');
@@ -63,6 +63,7 @@ async function bootGame() {
   const dom = new JSDOM('<!DOCTYPE html><html><head></head><body>' + body + '</body></html>', {
     url: 'file://' + process.cwd() + '/index.html',
     pretendToBeVisual: false,
+    ...(opts.windowOptions ? { windowOptions: opts.windowOptions } : {}),
   });
   const win = dom.window;
   win.HTMLCanvasElement.prototype.getContext = function (kind) {
@@ -79,16 +80,61 @@ async function bootGame() {
   win.speechSynthesis = { cancel: () => {}, speak: () => {} };
   win.requestAnimationFrame = cb => { win.__rafCbs.push(cb); return win.__rafCbs.length; };
   win.__rafCbs = [];
+  // jsdom lacks ResizeObserver: the margin fitter's content-change watcher would be
+  // a no-op. Provide a minimal stub that records callbacks so tests can trigger them.
+  win.ResizeObserver = function (cb) { this.__cb = cb; this.observe = () => {}; this.disconnect = () => {}; };
+  // jsdom has no layout: offsetWidth/offsetHeight are always 0, so the margin fitter's
+  // measurement guard would never see a real value. Emulate a simple layout model so
+  // tests can verify the fitter actually writes --fit and clamps it to the viewport:
+  // width = 800*fit; height = content height at that scale (base 796), GROWN by an
+  // extra strip when the box gets narrow enough for the HUD/button rows to wrap —
+  // mirroring the real flex-wrap behaviour the fitter's refinement passes handle.
+  // The strip scales with font-size (∝fit) but not directly with fit, so repeated
+  // refinement measurably converges instead of oscillating.
+  Object.defineProperty(win.HTMLElement.prototype, 'offsetWidth', { get() {
+    if (this.id === 'game') return 800 * fitOf(this); return 0; } });
+  Object.defineProperty(win.HTMLElement.prototype, 'offsetHeight', { get() {
+    if (this.id !== 'game') return 0;
+    const f = fitOf(this), w = 800 * f;
+    let h = 796 * f;
+    if (w < 720) h += Math.min(120, 720 - w) * .25 * f; // wrapped-rows allowance
+    return h; } });
+  function fitOf(el) {
+    const v = parseFloat(el.style.getPropertyValue('--fit'));
+    if (Number.isFinite(v) && v > 0) return v;
+    // No --fit written yet: mirror index.html's pure-CSS clamp guess so the emulated
+    // layout reflects what the browser would lay out BEFORE the JS fitter refines it:
+    //   min(1, min(100vw - 34px, 100vh - 34px) / 800px) * .82
+    // (viewport via innerWidth/innerHeight minus the same chrome bar as clientHeight).
+    const vw = win.innerWidth, vh = win.innerHeight - 15;
+    return Math.min(1, Math.min(Math.min(vw, vh) - 34, vw - 34) / 800) * .82;
+  }
+  // jsdom's documentElement.clientHeight is always 0; emulate the SMALL viewport
+  // height (innerHeight minus a browser chrome bar) so the fitter's vh clamp binds:
+  // fitGame() takes min(innerHeight, visualViewport.height, clientHeight). In a real
+  // mobile browser visualViewport ≤ innerHeight, but it does NOT subtract the desktop
+  // chrome bar — keeping it at innerHeight here mirrors that and leaves clientHeight
+  // (753 at 1024×768) as the deciding axis. width/height are LIVE getters so a test
+  // that resizes the window mid-run sees the clamp react too.
+  Object.defineProperty(win.Element.prototype, 'clientHeight', { get() { return win.innerHeight - 15; } });
+  Object.defineProperty(win, 'visualViewport', { configurable: true, value: {
+    get height() { return win.innerHeight; }, get width() { return win.innerWidth; } } });
   // deterministic frame clock: pump() drives it manually via the rAF queue above
   win.performance.now = () => win.__now || (win.__now = 1000);
 
   const g = globalThis;
   // Only browser globals the modules actually reference. Never shadow Node's
   // setTimeout etc. — jsdom's window timers recurse infinitely when rebound to globals.
+  // innerWidth/innerHeight are bound as LIVE GETTERS (not frozen values): fitGame()
+  // reads them as bare globals, and tests that resize win.innerWidth after boot must
+  // see the fitter react on the next pumped frame.
   for (const k of ['window', 'document', 'navigator', 'location', 'Audio',
     'SpeechSynthesisUtterance', 'speechSynthesis', 'requestAnimationFrame', 'devicePixelRatio',
-    'innerWidth', 'innerHeight', 'addEventListener', 'removeEventListener']) {
+    'addEventListener', 'removeEventListener']) {
     if (k in win) Object.defineProperty(g, k, { value: win[k], writable: true, configurable: true });
+  }
+  for (const k of ['innerWidth', 'innerHeight']) {
+    Object.defineProperty(g, k, { get: () => win[k], configurable: true });
   }
   await import('../src/main.js');
   bootedWin = win;

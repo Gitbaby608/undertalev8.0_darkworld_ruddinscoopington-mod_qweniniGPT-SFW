@@ -19,12 +19,16 @@ body{
 }
 @keyframes bg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
 /* Undertale-style boss box: near-fullscreen, scaled down a bit (~82% of the viewport
-   per axis → ≈9% border each side). The border IS the animated rainbow page background
+   per axis → ≈9% margin each side). The margin IS the animated rainbow page background
    showing through — #game itself has no outer border; its dark purple body forms the
-   box interior. --fit is still clamped by the viewport so tiny windows can never crop
-   it — it just shrinks further to fit. */
+   box interior. --fit is only the INITIAL scale guess (the real one is recomputed from
+   the measured layout height in JS every resize/frame — CSS can't measure element
+   height, which is why the old pure-CSS clamp could under-estimate and overflow).
+   min-height keeps the box tall enough that short/wide windows always leave vertical
+   rainbow margin instead of hugging the screen edges. */
 #game{--fit:min((100vw - 34px) * 0.82 / 800, (100vh - 34px) * 0.82 / 796);
- width:calc(800px * var(--fit));font-size:calc(9px * var(--fit));
+ width:calc(800px * var(--fit));min-height:calc(660px * var(--fit));
+ font-size:calc(9px * var(--fit));
  background:#100b2d;border:none;
  border-radius:12px;overflow:hidden;box-shadow:0 0 30px #ff65e7}
 #hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:calc(12px*var(--fit));

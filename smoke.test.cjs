@@ -7,7 +7,18 @@
 const { bootGame, pump, glStats, setGlThrowing } = require('./test/mocks.cjs');
 
 (async () => {
-  const win = await bootGame();
+  // Undertale-margin fitter (src/glfx.js fitGame): with the mock layout model (width =
+  // 800*fit, height = 796*fit plus a wrap allowance once the box narrows below 720px
+  // CSS width) it must actually run and pin the HEIGHT-constrained value. vh =
+  // innerHeight - 15 chrome bar (mock clientHeight). Viewport 1024x768 (set via
+  // bootGame windowOptions BEFORE the modules import — Node 18+ makes innerWidth/
+  // innerHeight read-only mid-run): .82*(768-15-34)/796 ≈ .741 < .82*(1024-34)/800 →
+  // height binds, exactly the case that used to overflow off-screen. The fitter
+  // bisects for the LARGEST scale whose measured box fits both axes; at that scale the
+  // box is ~593px wide (< 720) so the wrapped-rows strip applies and the true fixed
+  // point sits slightly lower (~0.714) — hence the ±0.03 band below, which still
+  // strictly excludes every oversized value (≥0.755 would clip the bottom margin).
+  const win = await bootGame({ windowOptions: { innerWidth: 1024, innerHeight: 768 } });
   const errors = [];
   const btn = sel => win.document.querySelector(sel);
   const click = el => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
@@ -63,7 +74,27 @@ const { bootGame, pump, glStats, setGlThrowing } = require('./test/mocks.cjs');
   // and NO error occurred outside the crash window.
   const cleanErrors = errors.length - caught;
   console.log('errors outside crash window:', cleanErrors, cleanErrors === 0 ? 'PASS' : 'FAIL');
-  const pass = !escaped && resumed && nonFinite === 0 && cleanErrors === 0;
+  // Margin-fitter assertion (see bootGame windowOptions above): the fitter ran on the
+  // first frame at 1024×768. It bisects toward the LARGEST fitting scale, so expect the
+  // naive height-bound clamp .82*(vh-34)/796 ≈ 0.741 within ±0.03 (wrap-strip fixed
+  // point ≈0.714 is the other end of the band), AND that the box stays fully on screen
+  // with rainbow margins on all sides — the invariant that actually matters.
+  const vh = win.innerHeight - 15;
+  const num = .82 * (vh - 34);
+  let expectFit = num / 796;
+  for (let i = 0; i < 3; i++) {
+    const extra = Math.min(120, Math.max(0, 720 - 800 * expectFit)) * .25;
+    expectFit = Math.min(num / (796 + extra), .82 * (win.innerWidth - 34) / 800);
+  }
+  const gameEl = btn('#game');
+  const fitVal = parseFloat(gameEl.style.getPropertyValue('--fit'));
+  const fitOK = Number.isFinite(fitVal) && Math.abs(fitVal - .741) < .03 &&
+    gameEl.offsetWidth <= win.innerWidth - 34 && gameEl.offsetHeight <= vh - 34 &&
+    fitVal >= expectFit - .001; // never ships smaller than the converged fixed point
+  console.log('margin fitter --fit:', fitVal, 'naive-clamp ~', (num / 796).toFixed(3),
+    'fixed-point ~', expectFit.toFixed(3), fitOK ? 'PASS' : 'FAIL');
+
+  const pass = !escaped && resumed && nonFinite === 0 && cleanErrors === 0 && fitOK;
   console.log(pass ? 'SMOKE TEST PASS' : 'SMOKE TEST FAIL');
   process.exit(pass ? 0 : 1);
 })().catch(e => { console.log('BOOT/EVAL ERROR:', e.message); process.exit(1); });
