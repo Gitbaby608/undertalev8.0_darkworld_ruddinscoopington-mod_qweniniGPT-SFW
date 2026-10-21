@@ -7,7 +7,7 @@ import { SPR, bspr } from './sprites.js';
 import { CHARQ, composeMsk } from './mask.js';
 import { particles } from './particles.js';
 import { NPCS, updNpc, bindSpr } from './npc.js';
-import { hero, boss } from './game.js';
+import { hero, boss, lunge } from './game.js';
 
 export const c = document.querySelector('#c');
 export const x = c.getContext('2d', { alpha: false });
@@ -43,8 +43,24 @@ function drawAtk() {
 export function draw() {
   x.drawImage(SPR['bg'], 0, 0, W, H);
   CHARQ.length = 0;
+  // pulsing telegraph markers UNDER everything else (they mark incoming danger)
+  for (const t of S.tele) {
+    const k = .55 + .45 * Math.sin((1 - t.t / t.dur) * 12);
+    x.globalAlpha = k;
+    spr(t.warn || 'warn', t.x, t.y);
+    x.globalAlpha = 1;
+  }
   for (const n of NPCS) { updNpc(n, S.time, 16.7); spr(n.id, n.x, n.y); }
-  spr('boss', boss.x, boss.y + Math.sin(S.time * .004) * 5);
+  // boss lunges at the hero during its attack windup — you SEE the attack coming
+  let bx = boss.x, by = boss.y + Math.sin(S.time * .004) * 5;
+  if (lunge.t >= 0) {
+    const p = lunge.t / 900;
+    const e = p < .3 ? p / .3 : 1 - (p - .3) / .7;
+    bx += (hero.x - boss.x) * .35 * e;
+    by += (hero.y - 60 - boss.y) * .35 * e;
+  }
+  spr('boss', bx, by);
+  if (lunge.t >= 0 && SPR[lunge.name]) spr(lunge.name, 400, 185);
   spr('hero', hero.x, hero.y);
   for (const b of S.bullets) spr(bspr(b), b.x, b.y);
   // one batched path per colour bucket (no per-particle beginPath/stroke)

@@ -9,6 +9,9 @@ export const S = {
   shake: 0,     // screen-shake intensity, decays each frame
 
   bullets: [],  // {x,y,vx,vy,col,r,s?}
+  tele: [],     // visible attack warnings: {x,y,t,dur,warn|boom}
+  pat: null,    // active boss attack: {id,name,e,phase,pt} while mode==='dodge'
+  busy: false,  // turn lock: one player action per turn until the boss attack ends
   keys: {},     // lowercase keyname -> bool
   atk: null,    // timing-bar state while mode==='attack': {p, d}
   dodgeTime: 0,

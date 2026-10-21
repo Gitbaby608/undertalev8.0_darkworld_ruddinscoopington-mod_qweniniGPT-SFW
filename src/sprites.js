@@ -85,7 +85,7 @@ const prop = (id, e, size) => mkSpr(id, 34 * PR, 34 * PR, s => { s.scale(PR, PR)
 prop('prop0', '🛴', 26); prop('prop1', '🎰', 26); prop('prop2', '📦', 26); prop('prop3', '🧶', 26);
 prop('crumb', '🍞', 15); prop('heart', '💌', 19); prop('note', '🎵', 19); prop('star', '✨', 19); prop('puff', '💨', 19); prop('z', '💤', 19);
 
-// Bullet sprites (ids referenced directly by game.js bullet patterns).
+// Bullet sprites (ids referenced directly by game.js/patterns.js bullet factories).
 const bulletSpr = (id, fill, stroke, dot) => mkSpr(id, 26, s => {
   s.fillStyle = fill; bl(s, 13, 13, 11, 1);
   s.strokeStyle = stroke; s.lineWidth = 2; s.beginPath(); s.arc(13, 13, 11, 0, 6.2832); s.stroke();
@@ -96,8 +96,106 @@ bulletSpr('b2', '#8fe3ff', '#2b8ba8', '#2b6c86');
 bulletSpr('b3', '#ff8fd0', '#a82b78', '#862b64');
 bulletSpr('b4', '#e5b16d', '#8a5a1e', '#6b4315');
 bulletSpr('b5', '#ff4545', '#8f1414', '#6f0f0f');
-export const BSPR = ['b1', 'b2', 'b3', 'b4', 'b5'];
+
+// Unique per-pattern projectiles, baked with a white rim so they pop on any backdrop.
+const BS = 34; // bake size in logical px (mask blobs derive from w/h automatically)
+mkSpr('b6', BS, s => { // rainbow sprinkles (rain pattern)
+  s.save(); s.translate(BS / 2, BS / 2); s.rotate(-.5);
+  ['#ff477e', '#ffb84f', '#fff36b', '#56f5ad', '#54dfff', '#ae7cff'].forEach((c, i) => {
+    const a = i * 1.05 - 1.6;
+    s.save(); s.rotate(a); s.translate(0, -6);
+    s.lineWidth = 5; s.lineCap = 'round';
+    s.strokeStyle = '#fff'; s.beginPath(); s.moveTo(0, -4); s.lineTo(0, 4); s.stroke();
+    s.strokeStyle = c; s.beginPath(); s.moveTo(0, -4); s.lineTo(0, 4); s.stroke();
+    s.restore();
+  });
+  s.restore();
+});
+mkSpr('b7', BS, s => { // jelly-swirl fork (forked shots)
+  s.save(); s.translate(BS / 2, BS / 2);
+  for (let k = 0; k < 3; k++) {
+    s.rotate(2.094);
+    s.strokeStyle = '#fff'; s.lineWidth = 7; s.lineCap = 'round';
+    s.beginPath(); s.moveTo(0, 0); s.quadraticCurveTo(5, -7, 11, -9); s.stroke();
+    s.strokeStyle = k === 0 ? '#ff5ec8' : k === 1 ? '#8f5bff' : '#ff2fa0'; s.lineWidth = 4;
+    s.beginPath(); s.moveTo(0, 0); s.quadraticCurveTo(5, -7, 11, -9); s.stroke();
+  }
+  s.fillStyle = '#fff'; bl(s, 0, 0, 4, 1); s.fillStyle = '#ff8fd0'; bl(s, 0, 0, 2.6, 1);
+  s.restore();
+});
+mkSpr('b8', BS, s => { // glitter star (star burst)
+  s.save(); s.translate(BS / 2, BS / 2);
+  s.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? 6 : 14, a = i * Math.PI / 5 - Math.PI / 2;
+    i ? s.lineTo(Math.cos(a) * r, Math.sin(a) * r) : s.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  s.closePath();
+  s.fillStyle = '#fff'; s.fill();
+  s.fillStyle = '#ffe98a'; s.fill();
+  s.fillStyle = '#fff'; bl(s, -3, -4, 2.2, .95);
+  s.restore();
+});
+mkSpr('b9', BS, s => { // hot fudge fireball (cone spray)
+  s.save(); s.translate(BS / 2, BS / 2);
+  s.fillStyle = '#fff'; bl(s, 0, 0, 12, 1);
+  s.fillStyle = '#6b3a12'; bl(s, 0, 0, 10, 1);
+  s.fillStyle = '#ff8b3d'; bl(s, 0, 1, 7, 1);
+  s.fillStyle = '#ffd23b'; bl(s, -1, 0, 4, 1);
+  s.fillStyle = '#fff'; bl(s, -3, -4, 2, .9);
+  s.restore();
+});
+mkSpr('b10', BS, s => { // cherry bomb with stem + leaf (landmine drops)
+  s.save(); s.translate(BS / 2, BS / 2 + 2);
+  s.strokeStyle = '#fff'; s.lineWidth = 4; s.lineCap = 'round';
+  s.beginPath(); s.moveTo(0, -8); s.quadraticCurveTo(2, -13, 7, -13); s.stroke();
+  s.fillStyle = '#56f5ad'; s.beginPath(); s.ellipse(8, -13, 4, 2.2, -.5, 0, 6.2832); s.fill();
+  s.fillStyle = '#fff'; bl(s, 0, 1, 11, 1);
+  s.fillStyle = '#ff2f4d'; bl(s, 0, 1, 9, 1);
+  s.fillStyle = '#ff8b9d'; bl(s, -3, -3, 3, .95);
+  s.restore();
+});
+mkSpr('b11', BS, s => { // waffle brick grid (wall sweep)
+  s.save(); s.translate(BS / 2, BS / 2);
+  s.fillStyle = '#fff'; s.fillRect(-13, -13, 26, 26);
+  s.fillStyle = '#e5b16d'; s.fillRect(-11.5, -11.5, 23, 23);
+  s.strokeStyle = '#8a5a1e'; s.lineWidth = 2;
+  for (let g = -7; g <= 7; g += 7) {
+    s.beginPath(); s.moveTo(g, -11.5); s.lineTo(g, 11.5); s.stroke();
+    s.beginPath(); s.moveTo(-11.5, g); s.lineTo(11.5, g); s.stroke();
+  }
+  s.restore();
+});
+mkSpr('b12', BS, s => { // spinning mint pinwheel (orbiting spiral)
+  s.save(); s.translate(BS / 2, BS / 2);
+  s.fillStyle = '#fff';
+  for (let k = 0; k < 4; k++) {
+    s.save(); s.rotate(k * Math.PI / 2);
+    s.beginPath(); s.moveTo(0, 0); s.quadraticCurveTo(11, -2, 13, -9); s.quadraticCurveTo(4, -6, 0, 0); s.fill();
+    s.restore();
+  }
+  s.fillStyle = '#56f5ad';
+  for (let k = 0; k < 4; k++) {
+    s.save(); s.rotate(k * Math.PI / 2);
+    s.beginPath(); s.moveTo(0, 0); s.quadraticCurveTo(9, -2, 11, -7); s.quadraticCurveTo(3, -5, 0, 0); s.fill();
+    s.restore();
+  }
+  s.fillStyle = '#fff'; bl(s, 0, 0, 3, 1); s.fillStyle = '#2b8ba8'; bl(s, 0, 0, 1.8, 1);
+  s.restore();
+});
+export const BSPR = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'b10', 'b11', 'b12'];
 export const bspr = b => b.s;
+
+// Pulsing warning markers drawn under incoming attacks (the enemy's moves are visible!).
+mkSpr('warn', 44, s => {
+  s.strokeStyle = '#fff'; s.lineWidth = 3;
+  s.beginPath(); s.arc(22, 22, 17, 0, 6.2832); s.stroke();
+  s.fillStyle = '#fff';
+  s.beginPath(); s.moveTo(22, 9); s.lineTo(36, 22); s.lineTo(22, 35); s.lineTo(8, 22); s.closePath(); s.fill();
+  s.fillStyle = '#ff2f4d';
+  s.beginPath(); s.moveTo(22, 13); s.lineTo(32, 22); s.lineTo(22, 31); s.lineTo(12, 22); s.closePath(); s.fill();
+  s.fillStyle = '#fff'; s.font = 'bold 15px monospace'; s.textBaseline = 'middle'; s.fillText('!', 22, 23);
+});
 
 // Text banners baked once (TXR supersample) — no per-frame font rasterisation.
 const TXR = 3;
@@ -108,3 +206,11 @@ const txtSpr = (id, str, col) => mkSpr(id, 420 * TXR, 30 * TXR, s => {
 txtSpr('txt0', 'DODGE THE DESSERT!', '#fff');
 txtSpr('txt1', 'CHOOSE YOUR ACTION BELOW!', '#fff');
 txtSpr('txt2', 'HIT THE GREEN! (SPACE / TAP)', '#ffe98a');
+// Attack-name banner over the boss during its windup (red panel = danger).
+export const txtWarn = (id, str) => mkSpr(id, 460 * TXR, 34 * TXR, s => {
+  s.scale(TXR, TXR);
+  s.fillStyle = '#5e0016'; s.fillRect(0, 0, 460, 34);
+  s.strokeStyle = '#fff'; s.lineWidth = 3; s.strokeRect(2, 2, 456, 30);
+  s.fillStyle = '#ffe98a'; s.font = '12px "Press Start 2P",monospace'; s.textBaseline = 'middle';
+  s.fillText(str, 230, 18);
+});
