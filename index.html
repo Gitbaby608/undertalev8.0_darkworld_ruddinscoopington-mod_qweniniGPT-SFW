@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>🌈 Rainbow Neighbourhood Mayhem</title>
+<link rel="stylesheet" href="css/style.css">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
 *{box-sizing:border-box}
@@ -75,10 +76,6 @@ p{font-size:calc(10px*var(--fit));line-height:2}
   <button data-a="item">🍨 ICE CREAM</button>
   <button data-a="mercy">💚 MERCY</button>
   <button id="sheepBtn">🐑 BEEP</button>
-  <button id="lb">🎵 LOAD BGM</button>
-  <button id="lu">🔗 URL</button>
-  <button id="ls">🐑 LOAD SHEEP</button>
-  <input type="file" id="fb" accept="audio/*" hidden><input type="file" id="fs" accept="audio/*" hidden>
   <button id="sound">🔊 SOUND ON</button>
  </div>
  <div id="overlay">
@@ -92,6 +89,7 @@ p{font-size:calc(10px*var(--fit));line-height:2}
   </div>
  </div>
 </div>
+<script type="module" src="src/main.js"></script>
 <script>
 (()=>{
 const c=document.querySelector('#c'),x=c.getContext('2d',{alpha:false});

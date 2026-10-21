@@ -1,15 +1,18 @@
 // All visuals are baked ONCE into offscreen sprite canvases (supersampled).
 // A frame is ~20 drawImage() calls — NEVER reintroduce per-frame shadowBlur,
 // gradients or text rasterisation in draw(); that was the original 30fps cause.
-import { DPR, W, H, rand } from './util.js';
+import { W, H, rand } from './util.js';
+
+// Sprite supersample factor: bake once at 2-3x, draw downscaled (crisp + cheap).
+const DPR = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
 import { NPCS } from './data.js';
 
 export const SPR = {};
 
-// mkSpr(id, drawFn, shadowed)  OR  mkSpr(id, width, height, drawFn, shadowed).
+// mkSpr(id, drawFn)  OR  mkSpr(id, width, height, drawFn).
 // A draw fn may carry its own .w/.h (used by emojiSprite) as the default size.
-export function mkSpr(id, w, h, drawFn, shadowed) {
-  if (typeof w === 'function') { shadowed = h; drawFn = w; w = Math.round(drawFn.w || 64); h = Math.round(drawFn.h || 64); }
+export function mkSpr(id, w, h, drawFn) {
+  if (typeof w === 'function') { drawFn = w; w = Math.round(drawFn.w || 64); h = Math.round(drawFn.h || 64); }
   const cv = document.createElement('canvas');
   cv.width = Math.ceil(w * DPR); cv.height = Math.ceil(h * DPR);
   const s = cv.getContext('2d');
@@ -79,10 +82,10 @@ mkSpr('bub', 190, 36, s => {
 // Props baked at 3x -> smooth ~11px sprites.
 const PR = 3;
 const prop = (id, e, size) => mkSpr(id, 34 * PR, 34 * PR, s => { s.scale(PR, PR); s.font = size + 'px serif'; s.textAlign = 'center'; s.textBaseline = 'middle'; s.fillText(e, 17, 19); });
-prop('prop0', '🛴', 26); prop('prop1', '🎰', 26); prop('prop2', '📦', 26); prop('prop3', '🧶', 26); prop('prop4', '🪧', 26);
+prop('prop0', '🛴', 26); prop('prop1', '🎰', 26); prop('prop2', '📦', 26); prop('prop3', '🧶', 26);
 prop('crumb', '🍞', 15); prop('heart', '💌', 19); prop('note', '🎵', 19); prop('star', '✨', 19); prop('puff', '💨', 19); prop('z', '💤', 19);
 
-// Bullet sprites (BSPR order matches attackPattern colours).
+// Bullet sprites (ids referenced directly by game.js bullet patterns).
 const bulletSpr = (id, fill, stroke, dot) => mkSpr(id, 26, s => {
   s.fillStyle = fill; bl(s, 13, 13, 11, 1);
   s.strokeStyle = stroke; s.lineWidth = 2; s.beginPath(); s.arc(13, 13, 11, 0, 6.2832); s.stroke();
@@ -94,7 +97,7 @@ bulletSpr('b3', '#ff8fd0', '#a82b78', '#862b64');
 bulletSpr('b4', '#e5b16d', '#8a5a1e', '#6b4315');
 bulletSpr('b5', '#ff4545', '#8f1414', '#6f0f0f');
 export const BSPR = ['b1', 'b2', 'b3', 'b4', 'b5'];
-export const bspr = b => b.s || 'b1';
+export const bspr = b => b.s;
 
 // Text banners baked once (TXR supersample) — no per-frame font rasterisation.
 const TXR = 3;

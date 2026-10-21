@@ -2,7 +2,10 @@
 // never the backdrop. Each character sprite gets a sibling solid-blob mask baked once
 // (mkMask). draw() records every character position into CHARQ; composeMsk() stamps
 // them into the shared MC canvas, which is uploaded to GL texture unit 3 each frame.
-import { DPR, W, H } from './util.js';
+import { W, H } from './util.js';
+
+// Sprite supersample factor: bake once at 2-3x, draw downscaled (crisp + cheap).
+const DPR = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
 import { SPR, BSPR } from './sprites.js';
 
 export const MSK = {};

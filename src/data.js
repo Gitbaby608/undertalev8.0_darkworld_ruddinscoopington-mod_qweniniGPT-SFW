@@ -26,19 +26,20 @@ export const END_LINES = [
   'THE WAFFLE PROPHECY IS FULFILLED.',
 ];
 
-// Remote-only audio (CORS may block some hosts; every entry is tried in order,
-// silent WAV data-URI guarantees tryList always resolves).
+// Remote-only audio (CORS may block some hosts; every entry is tried in order and the
+// trailing silent WAV data-URI guarantees loadRemoteAudio always resolves to something).
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 export const BGM_SRC = [
   'https://myinstants.com/media/sounds/lildeucedeuce-beep-beep-im-a-sheep.mp3',
   'https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3',
   'https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3',
+  SILENT_WAV,
 ];
 // Remix first — the sheep honks the remix.
 export const SHEEP_SRC = [
   'https://myinstants.com/media/sounds/beep-beep-im-a-sheep-remix.mp3',
   'https://myinstants.com/media/sounds/asdf-beep-beep-im-a-sheep.mp3',
   'https://myinstants.com/media/sounds/beep-ima-sheep-song.mp3',
+  SILENT_WAV,
 ];
-const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-BGM_SRC.push(SILENT_WAV);
-SHEEP_SRC.push(SILENT_WAV);
+

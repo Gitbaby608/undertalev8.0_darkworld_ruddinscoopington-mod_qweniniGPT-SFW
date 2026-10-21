@@ -1,21 +1,24 @@
 # 🌈 Rainbow Neighbourhood Mayhem
 
-A single-file browser game, deployed with **GitHub Pages**.
+A browser game deployed with **GitHub Pages**. No build step — Pages serves the repo root verbatim.
 
-## How it works on GitHub Pages
-- The game lives at `index.html` at the repo root, so Pages serves it automatically at
-  `https://<user>.github.io/<repo>/` — no build step needed.
+## Structure
+- `index.html` — thin DOM shell; styles in `css/style.css`; code as ES modules under `src/` (entry: `src/main.js`).
 - `.nojekyll` disables Jekyll processing (Pages would otherwise mangle/ignore files starting with `_`).
-- Audio sources are remote URLs (myinstants) plus optional local fallbacks `bgm.mp3` / `sheep.mp3`.
-  Those fallbacks are tried only if you add them to the repo; missing files fail gracefully.
-  Remote audio may be blocked by CORS/mixed-content depending on the host — use the in-game
-  **🔗 URL** or **LOAD BGM / LOAD SHEEP** buttons (files are persisted in IndexedDB).
+- Audio is remote-only (`BGM_SRC` / `SHEEP_SRC` URL lists in `src/data.js`). Each list is tried in order and ends with a silent WAV data-URI, so loading always resolves. There are no local-file audio features.
+
+## Playing locally
+Any static server works, e.g.:
+```
+npx serve .        # or: python3 -m http.server
+```
+(ES modules need http:// — opening `index.html` via file:// will not load `src/`.)
 
 ## Enabling GitHub Pages
-1. Push this branch to GitHub (default branch recommended).
-2. Repo → **Settings → Pages** → Source: **Deploy from a branch** → select your branch + `/ (root)` → Save.
-3. Or add `.github/workflows/pages.yml` (included) and Pages deploys on every push automatically.
+`.github/workflows/pages.yml` deploys automatically on push to `main` (checkout → upload-pages-artifact path `.` → deploy-pages). Alternatively: Repo → **Settings → Pages** → Source: **Deploy from a branch** → branch + `/ (root)`.
 
-## Optional workflow deploy
-`.github/workflows/pages.yml` uses the official `actions/deploy-pages` setup. Set the repo
-permission `Actions: Read and write` is not required for Pages; just push and check the Actions tab.
+## Testing
+```
+npm test           # jsdom smoke test: boots the module graph with mocked 2D/WebGL contexts
+```
+See `AGENTS.md` for architecture notes and verification details.

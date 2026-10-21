@@ -1,5 +1,14 @@
 {
-  "dependencies": {
+  "name": "rainbow-rumble",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser game served as a static site (GitHub Pages). ES modules in src/, entry src/main.js.",
+  "scripts": {
+    "test": "node smoke.test.cjs",
+    "start": "npx serve ."
+  },
+  "devDependencies": {
     "jsdom": "^29.1.1"
   }
 }
